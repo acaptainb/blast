@@ -624,40 +624,216 @@ def split(nums, ms):
     return best[1]
 
 
+# --------------------------------------------------------------------------- verification
+def patched_texts(fcs):
+    """{rel: new text or None (deleted)} for a patch, or None when it cannot be replayed exactly."""
+    out = {}
+    for fc in fcs:
+        if fc.binary:
+            return None
+        old_rel = fc.rename_from or fc.old_path
+        new_rel = fc.rename_to or fc.new_path
+        for rel in (old_rel, new_rel):
+            if rel and (rel.rsplit("/", 1)[-1] in PYTEST_FILES or rel in ("pyproject.toml", "setup.cfg")):
+                return None
+        if fc.is_deleted:
+            out[old_rel] = None
+            continue
+        old_text = "" if fc.is_new else read_old(old_rel)
+        if old_text is None:
+            old_text = ""
+        new_text, ok = apply_hunks(old_text, fc.hunks) if fc.hunks else (old_text, True)
+        if not ok:
+            return None
+        if old_rel and new_rel and old_rel != new_rel and not fc.is_new:
+            out[old_rel] = None
+        out[new_rel or old_rel] = new_text
+    return out
+
+
+def _load_json(name, default):
+    try:
+        with open(os.path.join(MAPS, name), encoding="utf-8") as f:
+            return json.load(f)
+    except OSError:
+        return default
+
+
+CPU = _load_json("cpu.json", {"tests": {}, "file_overhead": {}})
+CPU_SCALE = float(os.environ.get("BLAST_CPU_SCALE", "1.15"))
+
+
+def run_cost(tids):
+    if not tids:
+        return 0.0
+    files = {t.split("::")[0] for t in tids}
+    fo = CPU["file_overhead"]
+    over = max(fo.get(f, 1.0) for f in files) + 0.08 * (len(files) - 1)
+    return CPU_SCALE * (over + sum(CPU["tests"].get(t, 1.0) for t in tids))
+
+
+def pack_cost(nums, ms):
+    if not nums:
+        return 0.0
+    ws = split(nums, ms)
+    return max(sum(ms[t] for t in w) for w in ws) / 1000 + 2 * len(ws)
+
+
+def p_clean(patched):
+    """Prior probability that a change breaks no test at all (given it reaches some test)."""
+    q = 1.0
+    for rel in patched:
+        if rel.endswith(".py"):
+            q *= Q_CODE
+        else:
+            q *= Q_DATA  # an edited fixture almost always changes an expected result
+    return q
+
+
+Q_CODE = float(os.environ.get("BLAST_Q_CODE", "0.45"))
+Q_DATA = float(os.environ.get("BLAST_Q_DATA", "0.04"))
+
+
+def order_tests(tids):
+    """Classes cheapest first, tests cheapest first inside a class."""
+    cpu = CPU["tests"]
+    groups = {}
+    for t in tids:
+        groups.setdefault(t.rsplit("::", 1)[0], []).append(t)
+    keys = sorted(groups, key=lambda k: sum(cpu.get(t, 1.0) for t in groups[k]))
+    out = []
+    for k in keys:
+        out += sorted(groups[k], key=lambda t: cpu.get(t, 1.0))
+    return out
+
+
+def plan(cands, ms, num2id, q):
+    """-> (tests to run, tests still worth running after a failure, estimated cpu)."""
+    if not cands:
+        return [], [], 0.0
+    cpu = CPU["tests"]
+    base = pack_cost(cands, ms)
+    best = (base, [], [], 0.0)
+    by_cpu = sorted(cands, key=lambda n: -cpu.get(num2id[n], 1.0))
+    for j in range(0, min(6, len(cands))):
+        keep = by_cpu[:j]
+        run = [num2id[n] for n in by_cpu[j:]]
+        rc_all = run_cost(run)
+        ordered = order_tests(run)
+        # after a failure the commit is not empty; only tests whose run is cheaper than
+        # their share of a worker keep being worth running
+        after = [t for t in run if CPU_SCALE * cpu.get(t, 1.0) < ms[id2num_g[t]] / 1000 - 0.3]
+        rc_first = run_cost(ordered[:1])
+        rc_after = CPU_SCALE * sum(cpu.get(t, 1.0) for t in after)
+        rest = sorted(set(cands) - {id2num_g[t] for t in after})
+        fail_cost = rc_first + rc_after + pack_cost(rest, ms)
+        clean_cost = rc_all + pack_cost(sorted(keep), ms)
+        e = q * clean_cost + (1 - q) * fail_cost
+        if e < best[0] - 0.1:
+            best = (e, ordered, after, rc_all)
+    return best[1], best[2], best[3]
+
+
+id2num_g = {}
+
+
 # --------------------------------------------------------------------------- main
 def main():
+    import time
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    import runner
+
+    t_start = time.monotonic()
+    budget = float(os.environ.get("BLAST_BUDGET", "140"))
+    verify = os.environ.get("BLAST_VERIFY", "1") == "1"
+
     with open(os.path.join(DATA, "tests.json"), encoding="utf-8") as f:
         tests = json.load(f)["tests"]
     ms = {t["number"]: int(t["seconds"] * 1000 + 0.5) for t in tests}
     id2num = {t["id"]: t["number"] for t in tests}
+    num2id = {t["number"]: t["id"] for t in tests}
+    id2num_g.update(id2num)
     bit_num = [id2num.get(tid) for tid in M["tests"]]
     known = set(M["tests"])
     unknown = [t["number"] for t in tests if t["id"] not in known]
     all_nums = sorted(ms)
 
     cdir = os.path.join(DATA, "commits")
-    out = []
+    commits = []
     for name in sorted(os.listdir(cdir)):
         if not name.endswith(".patch"):
             continue
         cid = name[: -len(".patch")]
+        patched = None
         try:
             with open(os.path.join(cdir, name), "rb") as f:
                 text = f.read().decode("utf-8", "surrogateescape")
+            fcs = parse_patch(text)
             bits = 0
-            for fc in parse_patch(text):
+            for fc in fcs:
                 bits |= file_bits(fc)
             nums = [bit_num[i] for i in range(NBITS) if bits >> i & 1 and bit_num[i] is not None]
             if bits:
                 nums += unknown
+            try:
+                patched = patched_texts(fcs)
+            except Exception:
+                patched = None
         except Exception as e:  # never lose a commit: fall back to running everything
             log(f"{cid}: analysis failed ({e!r}); selecting every test")
             nums = all_nums
-        workers = split(sorted(set(nums)), ms)
-        out.append(json.dumps({"commit": cid, "workers": workers}, separators=(",", ":")))
-        log(f"{cid}: {len(nums)} tests, {len(workers)} workers")
+        nums = sorted(set(nums))
+        run, after, est = [], [], 0.0
+        if verify and patched is not None and nums and not unknown:
+            run, after, est = plan(nums, ms, num2id, p_clean(patched))
+        commits.append({"cid": cid, "cands": nums, "run": run, "after": after, "est": est, "patched": patched})
+
+    def saving(c):
+        return pack_cost(c["cands"], ms) - pack_cost(sorted(set(c["cands"]) - {id2num[t] for t in c["run"]}), ms) - c["est"]
+
+    # most valuable verifications first, while the time budget lasts
+    jobs = [c for c in commits if c["run"]]
+    jobs.sort(key=lambda c: saving(c) / max(c["est"], 0.1), reverse=True)
+    duck = os.path.join(MAPS, "duck.pkl")
+    nworkers = int(os.environ.get("BLAST_JOBS", "2"))
+    lock = threading.Lock()
+    committed = [0.0]
+
+    def do(c):
+        with lock:
+            left = budget - (time.monotonic() - t_start)
+            if committed[0] + c["est"] * 1.5 + 3 > left * nworkers:
+                log(f"{c['cid']}: verification skipped (time budget)")
+                c["res"] = {}
+                return
+            committed[0] += c["est"]
+        tids = c["run"]
+        timeout = min(max(20.0, 3 * c["est"] + 10), max(5.0, left - 5))
+        job = {"sg": SG, "patched": c["patched"], "tests": tids, "after_fail": c["after"], "duck": duck if os.path.exists(duck) else None}
+        t0 = time.monotonic()
+        c["res"] = runner.run_job(job, timeout)
+        with lock:
+            committed[0] -= c["est"]
+        log(
+            f"{c['cid']}: ran {len(tids)} tests (est {c['est']:.1f}s) in {time.monotonic() - t0:.1f}s, "
+            f"{sum(c['res'].values())} failed, {len(tids) - len(c['res'])} unfinished"
+        )
+
+    with ThreadPoolExecutor(max(1, nworkers)) as pool:
+        list(pool.map(do, jobs))
+
+    out = []
+    for c in commits:
+        res = c.get("res", {})
+        sel = [n for n in c["cands"] if res.get(num2id[n], True)]
+        ws = split(sel, ms)
+        out.append(json.dumps({"commit": c["cid"], "workers": ws}, separators=(",", ":")))
+        log(f"{c['cid']}: {len(c['cands'])} candidates, {len(sel)} selected, {len(ws)} workers")
     sys.stdout.write("\n".join(out) + ("\n" if out else ""))
     sys.stdout.flush()
+    log(f"total wall {time.monotonic() - t_start:.1f}s")
 
 
 if __name__ == "__main__":

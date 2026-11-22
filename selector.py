@@ -914,7 +914,7 @@ def order_tests(tids):
 
 MAX_TEST_CPU = float(os.environ.get("BLAST_MAX_TEST_CPU", "1.0"))  # never run a test heavier than this
 MAX_JOB_CPU = float(os.environ.get("BLAST_MAX_JOB_CPU", "4.0"))  # nor a job heavier than this
-MARGIN = float(os.environ.get("BLAST_MARGIN", "0.6"))  # expected saving must beat the cost by this much
+MARGIN = float(os.environ.get("BLAST_MARGIN", "0.25"))  # expected saving must beat the cost by this much
 
 
 def plan(cands, ms, num2id, q):

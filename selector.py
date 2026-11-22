@@ -38,6 +38,10 @@ def _load(name):
 
 M = _load("depmap.bin")
 S = _load("static.bin")
+try:
+    CMP = _load("cmpprof.bin")
+except OSError:
+    CMP = {"cases": {}, "sites": set()}
 ROWS = M["rows"]
 NBITS = len(M["tests"])
 ALL = (1 << NBITS) - 1
@@ -421,6 +425,61 @@ def scope_stmt_bits(rel, s, path):
     return load & users
 
 
+_BODY_FIELDS = {"body", "orelse", "finalbody", "handlers", "cases"}
+_SWAP = {
+    frozenset(("Is", "Eq")): "eqis",
+    frozenset(("IsNot", "NotEq")): "eqis",
+    frozenset(("Lt", "LtE")): "bound",
+    frozenset(("Gt", "GtE")): "bound",
+}
+
+
+def op_swaps(a, b, out, top=True):
+    """Walk two ASTs in step. Collect (old Compare node, kind) for every single-operator
+    comparison whose operator changed. False if they differ in any other way."""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, ast.AST):
+        if isinstance(a, ast.Compare) and len(a.ops) == 1 and len(b.ops) == 1 and type(a.ops[0]) is not type(b.ops[0]):
+            kind = _SWAP.get(frozenset((type(a.ops[0]).__name__, type(b.ops[0]).__name__)))
+            if kind is None:
+                return False
+            out.append((a, kind))
+            return op_swaps(a.left, b.left, out, False) and op_swaps(a.comparators, b.comparators, out, False)
+        for f in a._fields:
+            if top and f in _BODY_FIELDS:
+                continue  # a compound statement's header only: its body lines are other lines
+            if not op_swaps(getattr(a, f, None), getattr(b, f, None), out, False):
+                return False
+        return True
+    if isinstance(a, list):
+        return len(a) == len(b) and all(op_swaps(x, y, out, False) for x, y in zip(a, b))
+    return a == b
+
+
+def swap_bits(rel, s_old, s_new):
+    """Tests that can observe the change of s_old into s_new, if the only change is an
+    operator swap the comparison profile covers; None otherwise."""
+    swaps = []
+    if s_new is None or not op_swaps(s_old, s_new, swaps) or not swaps:
+        return None
+    cases = CMP["cases"]
+    sites = CMP["sites"]
+    bits = 0
+    for node, kind in swaps:
+        key = (rel, node.lineno, node.col_offset)
+        if key not in sites:
+            return None
+        e = cases.get(key)
+        hit = e[kind] if e else []
+        if hit == -1:
+            return None
+        for i in hit:
+            bits |= 1 << i
+    # only tests that ran the statement can see it
+    return bits & cov(rel, s_old.lineno, s_old.end_lineno, "any")
+
+
 def find_def(tree, qual):
     body = tree.body
     node = None
@@ -479,6 +538,15 @@ def mark_old_line(rel, ot, nt, r, srem, sadd):
         return cov(rel, stmt_lo(s), s.end_lineno, "fn")  # signature: whoever runs the body
     if isinstance(s, ast.ClassDef):
         return cov(rel, stmt_lo(s), s.end_lineno, "any")
+    s_new = None
+    if sadd:
+        npath = []
+        locate(nt.body, sadd[0][0], npath)
+        if npath and type(npath[-1]) is type(s) and len(npath) == len(path):
+            s_new = npath[-1]
+    sw = swap_bits(rel, s, s_new) if len(srem) == len(sadd) else None
+    if sw is not None:
+        return sw
     if isinstance(getattr(s, "body", None), list):  # if / for / while / with / try / match header or clause
         return cov(rel, s.lineno, s.end_lineno, "any")
     # a simple statement

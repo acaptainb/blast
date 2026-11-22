@@ -450,6 +450,7 @@ def scope_stmt_bits(rel, s, path):
 
 
 _BODY_FIELDS = {"body", "orelse", "finalbody", "handlers", "cases"}
+ANDOR = os.environ.get("BLAST_ANDOR", "0") == "1"  # and/or swap proofs: off until fully mutation-checked
 _SWAP = {
     frozenset(("Is", "Eq")): "eqis",
     frozenset(("IsNot", "NotEq")): "eqis",
@@ -464,7 +465,7 @@ def op_swaps(a, b, out, top=True):
     if type(a) is not type(b):
         return False
     if isinstance(a, ast.AST):
-        if isinstance(a, ast.BoolOp) and len(a.values) == 2 and len(b.values) == 2 and type(a.op) is not type(b.op):
+        if ANDOR and isinstance(a, ast.BoolOp) and len(a.values) == 2 and len(b.values) == 2 and type(a.op) is not type(b.op):
             out.append((a, "andor"))
             return op_swaps(a.values, b.values, out, False)
         if isinstance(a, ast.Compare) and len(a.ops) == 1 and len(b.ops) == 1 and type(a.ops[0]) is not type(b.ops[0]):

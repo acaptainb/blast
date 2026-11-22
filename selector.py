@@ -42,6 +42,10 @@ try:
     CMP = _load("cmpprof.bin")
 except OSError:
     CMP = {"cases": {}, "sites": set()}
+try:
+    DPROF = _load("dictprof.bin")
+except OSError:
+    DPROF = {}
 ROWS = M["rows"]
 NBITS = len(M["tests"])
 ALL = (1 << NBITS) - 1
@@ -508,6 +512,48 @@ def swap_bits(rel, s_old, s_new):
     return bits & cov(rel, s_old.lineno, s_old.end_lineno, "any")
 
 
+def dict_bits(rel, s_old, s_new, path):
+    """A class-body `NAME = {...}` whose keys are unchanged and some values changed: the tests
+    that read one of those keys or read the whole dict. None when that cannot be shown."""
+    if not (isinstance(s_old, ast.Assign) and isinstance(s_new, ast.Assign) and len(s_old.targets) == 1
+            and len(s_new.targets) == 1 and isinstance(s_old.targets[0], ast.Name)
+            and isinstance(s_new.targets[0], ast.Name) and s_old.targets[0].id == s_new.targets[0].id
+            and isinstance(s_old.value, ast.Dict) and isinstance(s_new.value, ast.Dict)):
+        return None
+    a, b = s_old.value, s_new.value
+    if len(a.keys) != len(b.keys):
+        return None
+    changed = []
+    for i, (ka, kb, va, vb) in enumerate(zip(a.keys, b.keys, a.values, b.values)):
+        if (ka is None) != (kb is None):
+            return None
+        if ka is not None and ast.dump(ka) != ast.dump(kb):
+            return None
+        if ast.dump(va) != ast.dump(vb):
+            if ka is None:
+                return None  # a **spread changed
+            changed.append(i)
+    if not changed:
+        return None
+    classes = [p.name for p in path if isinstance(p, ast.ClassDef)]
+    if not classes:
+        return None
+    m = DPROF.get(f"{rel}:{'.'.join(classes)}.{s_old.targets[0].id}")
+    if m is None or m["global_all"]:
+        return None
+    entry_key = dict(m["entries"])
+    bits = 0
+    for i in changed:
+        key = entry_key.get(i)
+        if key is None or key in m["global_keys"]:
+            return None  # read while importing: a derived table may carry the change
+        for t in m["keys"].get(key, ()):
+            bits |= 1 << t
+    for t in m["all"]:
+        bits |= 1 << t
+    return bits & cov(rel, s_old.lineno, s_old.end_lineno, "mod")
+
+
 def find_def(tree, qual):
     body = tree.body
     node = None
@@ -575,6 +621,11 @@ def mark_old_line(rel, ot, nt, r, srem, sadd):
     sw = swap_bits(rel, s, s_new) if len(srem) == len(sadd) else None
     if sw is not None:
         return sw
+    dbits = ALL  # dict-entry readers (ALL when that does not apply); intersected below
+    if not in_func and s_new is not None and len(srem) == len(sadd):
+        db = dict_bits(rel, s, s_new, path)
+        if db is not None:
+            dbits = db
     if isinstance(getattr(s, "body", None), list):  # if / for / while / with / try / match header or clause
         return cov(rel, s.lineno, s.end_lineno, "any")
     # a simple statement
@@ -599,9 +650,9 @@ def mark_old_line(rel, ot, nt, r, srem, sadd):
                     b = 0
                     for lam in lams:
                         b |= cov(rel, lam.lineno, lam.end_lineno, "fn")
-                    return b
+                    return b & dbits
     if not in_func:
-        return scope_stmt_bits(rel, s, path)
+        return scope_stmt_bits(rel, s, path) & dbits
     return cov(rel, s.lineno, s.end_lineno, "any")
 
 

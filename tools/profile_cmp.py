@@ -287,9 +287,9 @@ def main():
     jobs = int(sys.argv[5]) if len(sys.argv) > 5 else 8
     os.makedirs(work, exist_ok=True)
     tests = [t["id"] for t in json.load(open(tests_json, encoding="utf-8"))["tests"]]
-    byfile = {}
-    for t in tests:
-        byfile.setdefault(t.split("::")[0], []).append(t)
+    # one fresh process per test: caches built while a test runs (memoized results, copied
+    # tables) must be charged to every test that uses them, not only to the first one
+    byfile = {t: [t] for t in tests}
     duck = os.path.join(os.path.dirname(os.path.abspath(out)), "duck.pkl")
 
     def run(item):
@@ -310,7 +310,8 @@ def main():
         else:
             print("done", f, file=sys.stderr, flush=True)
 
-    items = sorted(enumerate(byfile.items()), key=lambda kv: -len(kv[1][1]) if "optimizer" in kv[1][0] or "parser" in kv[1][0] or "executor" in kv[1][0] else 0)
+    heavy = ("test_max_nodes", "tpcds", "tpch", "test_generator_memory", "test_scope")
+    items = sorted(enumerate(byfile.items()), key=lambda kv: not any(h in kv[1][0] for h in heavy))
     with ThreadPoolExecutor(jobs) as pool:
         list(pool.map(run, items))
 

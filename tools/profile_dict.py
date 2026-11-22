@@ -210,9 +210,9 @@ def main():
     jobs = int(sys.argv[5]) if len(sys.argv) > 5 else 8
     os.makedirs(work, exist_ok=True)
     tests = [t["id"] for t in json.load(open(tests_json, encoding="utf-8"))["tests"]]
-    byfile = {}
-    for t in tests:
-        byfile.setdefault(t.split("::")[0], []).append(t)
+    # one fresh process per test: caches built while a test runs (memoized results, copied
+    # tables) must be charged to every test that uses them, not only to the first one
+    byfile = {t: [t] for t in tests}
     duck = os.path.join(os.path.dirname(os.path.abspath(out)), "duck.pkl")
 
     def run(item):

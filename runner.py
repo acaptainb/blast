@@ -322,6 +322,7 @@ def run_job(job, timeout, python=sys.executable):
         sel = selectors.DefaultSelector()
         sel.register(p.stdout, selectors.EVENT_READ)
     done = False
+    reader = None
     buf = b""
     while True:
         if sel is not None:
@@ -330,7 +331,29 @@ def run_job(job, timeout, python=sys.executable):
                 break
             chunk = os.read(p.stdout.fileno(), 65536)
         else:
-            chunk = p.stdout.read1(65536) if hasattr(p.stdout, "read1") else p.stdout.read(65536)
+            # Windows: no select() on pipes; read in a thread and wait with a deadline
+            if reader is None:
+                import queue
+                import threading
+
+                q = queue.Queue()
+
+                def _pump():
+                    while True:
+                        c = p.stdout.read1(65536) if hasattr(p.stdout, "read1") else p.stdout.read(65536)
+                        q.put(c)
+                        if not c:
+                            return
+
+                reader = threading.Thread(target=_pump, daemon=True)
+                reader.start()
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            try:
+                chunk = q.get(timeout=left)
+            except Exception:
+                break
         if not chunk:
             break
         buf += chunk

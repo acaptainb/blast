@@ -1051,8 +1051,16 @@ HEAVY_MARGIN = float(os.environ.get("BLAST_HEAVY_MARGIN", "1.0"))
 HEAVY = os.environ.get("BLAST_HEAVY", "1") == "1"
 
 
+PLANCHECK = os.environ.get("BLAST_PLANCHECK", "1") == "1"
+
+
 def tpcds_lite():
-    """(query indices to execute, cpu of the check) for the per-query TPC-DS check, or None."""
+    """(queries to execute, cpu of the check, {query: plan fingerprint to compare}) for the
+    per-query TPC-DS check, or None.
+
+    A query runs when a changed line is one it runs. When the changed lines it runs are all
+    in its planning phase (parse, optimize, plan) and none in the executor package, the query
+    is only re-planned: an unchanged plan executes exactly as on the pinned commit."""
     if TOUCH["all"]:
         return None
     TPCDS = lazy("tpcds.bin")
@@ -1062,12 +1070,25 @@ def tpcds_lite():
     for f, ls in lines.items():
         if ls & TPCDS["setup"].get(f, set()):
             return None
-    idx = set(TOUCH["tpcds_idx"])
+    phases = TPCDS.get("phases") if PLANCHECK else None
+    shortcut = phases is not None and not any(f.startswith("sqlglot/executor/") for f in lines)
+    run = set(TOUCH["tpcds_idx"])
+    check = {}
     for i, q in enumerate(TPCDS["queries"]):
-        if TPCDS["executes"][i] and any(ls & q.get(f, set()) for f, ls in lines.items()):
-            idx.add(i)
-    idx = sorted(idx)
-    return idx, TPCDS["setup_cpu"] + 0.3 + sum(TPCDS["cpu"][i] for i in idx if i < len(TPCDS["cpu"]))
+        if not TPCDS["executes"][i] or i in run:
+            continue
+        if not any(ls & q.get(f, set()) for f, ls in lines.items()):
+            continue
+        if shortcut and TPCDS["fp"][i]:
+            plan_, exe, cmp_ = phases[i]
+            in_rest = any(ls & (exe.get(f, set()) | cmp_.get(f, set())) for f, ls in lines.items())
+            if not in_rest:
+                check[i] = TPCDS["fp"][i]
+                continue
+        run.add(i)
+    cpu = TPCDS["setup_cpu"] + 0.3 + sum(TPCDS["cpu"][i] for i in run if i < len(TPCDS["cpu"]))
+    cpu += sum(TPCDS["cpu_plan"][i] for i in check)
+    return sorted(run), cpu, check
 
 
 def heavy_plan(cands, ms, num2id, lite, light_files):
@@ -1231,7 +1252,8 @@ def main():
                 after = list(after) + heavy
                 est += hest
         commits.append({"cid": cid, "cands": nums, "run": run, "after": after, "est": est, "patched": patched,
-                        "tpcds_only": lite[0] if lite and TPCDS_ID in run else None})
+                        "tpcds_only": lite[0] if lite and TPCDS_ID in run else None,
+                        "tpcds_check": lite[2] if lite and TPCDS_ID in run else None})
 
     def saving(c):
         return pack_cost(c["cands"], ms) - pack_cost(sorted(set(c["cands"]) - {id2num[t] for t in c["run"]}), ms) - c["est"]
@@ -1245,7 +1267,8 @@ def main():
 
     def job_of(c):
         return {"sg": SG, "patched": c["patched"], "tests": c["run"], "after_fail": c["after"], "duck": duck,
-                "tpcds_only": c.get("tpcds_only")}
+                "tpcds_only": c.get("tpcds_only"),
+                "tpcds_check": {str(k): v for k, v in (c.get("tpcds_check") or {}).items()}}
 
     def timeout_of(c, left):
         return min(max(20.0, 3 * c["est"] + 10), max(5.0, left - 5))

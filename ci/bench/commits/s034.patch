@@ -1,0 +1,11 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -3637,6 +3637,7 @@
+ 
+         exclude = expression.args.get("exclude")
+ 
++        # Keep in sync with the generator
+         if not self.STAR_EXCLUDE_REQUIRES_DERIVED_TABLE and exclude:
+             exclude_sql = self.expressions(sqls=exclude, flat=True)
+             expressions = f"{expressions}{self.seg('EXCLUDE')} ({exclude_sql})"

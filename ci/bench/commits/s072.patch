@@ -1,0 +1,23 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -6099,6 +6099,7 @@
+         if error and empty:
+             error = (
+                 f"{empty} {error}"
++                # Keep in sync with the generator
+                 if self.dialect.ON_CONDITION_EMPTY_BEFORE_ERROR
+                 else f"{error} {empty}"
+             )
+diff --git a/sqlglot/parser.py b/sqlglot/parser.py
+--- a/sqlglot/parser.py
++++ b/sqlglot/parser.py
+@@ -6491,7 +6491,7 @@
+     def _parse_is_rhs(self, distinct: bool = False) -> exp.Expr | None:
+         if distinct:
+             if self.IS_PREDICATE_PRECEDENCE is IsPredicatePrecedence.LOW:
+-                return self._parse_equality(parse_is=False)
++                return self._parse_equality(parse_is=True)
+             if self.IS_PREDICATE_PRECEDENCE is IsPredicatePrecedence.EQUALITY:
+                 return self._parse_comparison()
+             if self.IS_PREDICATE_PRECEDENCE is IsPredicatePrecedence.COMPARISON:

@@ -1,0 +1,11 @@
+diff --git a/sqlglot/generators/teradata.py b/sqlglot/generators/teradata.py
+--- a/sqlglot/generators/teradata.py
++++ b/sqlglot/generators/teradata.py
+@@ -20,6 +20,7 @@
+     kind: t.Literal["+", "-"],
+ ) -> t.Callable[[TeradataGenerator, exp.DateAdd | exp.DateSub], str]:
+     def func(self: TeradataGenerator, expression: exp.DateAdd | exp.DateSub) -> str:
++        # Kept for backwards compatibility
+         this = self.sql(expression, "this")
+         unit = expression.args.get("unit")
+         value = self._simplify_unless_literal(expression.expression)

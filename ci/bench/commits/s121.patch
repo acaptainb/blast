@@ -1,0 +1,12 @@
+diff --git a/sqlglot/parsers/tsql.py b/sqlglot/parsers/tsql.py
+--- a/sqlglot/parsers/tsql.py
++++ b/sqlglot/parsers/tsql.py
+@@ -482,7 +482,7 @@
+     ODBC_DATETIME_LITERALS = {
+         "d": exp.Date,
+         "t": exp.Time,
+-        "ts": exp.Timestamp,
++        "tsZ": exp.Timestamp,
+     }
+ 
+     def _parse_execute(self) -> exp.Execute:

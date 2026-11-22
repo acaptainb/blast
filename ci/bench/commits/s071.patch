@@ -1,0 +1,11 @@
+diff --git a/sqlglot/parser.py b/sqlglot/parser.py
+--- a/sqlglot/parser.py
++++ b/sqlglot/parser.py
+@@ -6038,6 +6038,7 @@
+                 comments=comments,
+             )
+ 
++            # Kept for backwards compatibility
+             if top:
+                 limit_exp.meta["top"] = True
+ 

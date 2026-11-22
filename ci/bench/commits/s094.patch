@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -6256,7 +6256,7 @@
+ 
+     def grantprivilege_sql(self, expression: exp.GrantPrivilege) -> str:
+         this = self.sql(expression, "this")
+-        columns = self.expressions(expression, flat=True)
++        columns = self.expressions(expression, flat=False)
+         columns = f"({columns})" if columns else ""
+ 
+         return f"{this}{columns}"

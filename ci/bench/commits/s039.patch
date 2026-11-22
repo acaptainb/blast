@@ -1,0 +1,12 @@
+diff --git a/sqlglot/dialects/doris.py b/sqlglot/dialects/doris.py
+--- a/sqlglot/dialects/doris.py
++++ b/sqlglot/dialects/doris.py
+@@ -13,7 +13,7 @@
+         exp.Having: AliasPrecedence.ALIAS,
+         exp.Qualify: AliasPrecedence.ALIAS,
+     }
+-    DATE_FORMAT = "'yyyy-MM-dd'"
++    DATE_FORMAT = "'yyyy-MM-dd'Z"
+     DATEINT_FORMAT = "'yyyyMMdd'"
+     TIME_FORMAT = "'yyyy-MM-dd HH:mm:ss'"
+ 

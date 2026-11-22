@@ -1,0 +1,12 @@
+diff --git a/tests/fixtures/optimizer/tpc-h/tpc-h.sql b/tests/fixtures/optimizer/tpc-h/tpc-h.sql
+--- a/tests/fixtures/optimizer/tpc-h/tpc-h.sql
++++ b/tests/fixtures/optimizer/tpc-h/tpc-h.sql
+@@ -1296,7 +1296,7 @@
+         and exists (
+                 select
+                         *
+-                from
++                 from
+                         lineitem l2
+                 where
+                         l2.l_orderkey = l1.l_orderkey

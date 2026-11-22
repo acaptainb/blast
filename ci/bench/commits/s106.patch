@@ -1,0 +1,12 @@
+diff --git a/sqlglot/optimizer/canonicalize_internal_names.py b/sqlglot/optimizer/canonicalize_internal_names.py
+--- a/sqlglot/optimizer/canonicalize_internal_names.py
++++ b/sqlglot/optimizer/canonicalize_internal_names.py
+@@ -324,7 +324,7 @@
+                         continue
+ 
+                     for col in find_all_in_scope(node, exp.Column):
+-                        if not col.table and col.name in rename:
++                        if not col.table or col.name in rename:
+                             _canon(col.this, rename[col.name])
+ 
+                 scope_outputs[id(right_scope.expression)] = {

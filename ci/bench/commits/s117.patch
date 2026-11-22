@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -2821,7 +2821,7 @@
+         )
+ 
+         include_nulls = expression.args.get("include_nulls")
+-        if include_nulls is not None:
++        if include_nulls is None:
+             nulls = " INCLUDE NULLS " if include_nulls else " EXCLUDE NULLS "
+         else:
+             nulls = ""

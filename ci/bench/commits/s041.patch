@@ -1,0 +1,12 @@
+diff --git a/tests/fixtures/optimizer/eliminate_joins.sql b/tests/fixtures/optimizer/eliminate_joins.sql
+--- a/tests/fixtures/optimizer/eliminate_joins.sql
++++ b/tests/fixtures/optimizer/eliminate_joins.sql
+@@ -707,7 +707,7 @@
+   empty_x.a
+ FROM (
+   SELECT
+-    x.a,
++    x.a, 42
+     x.b
+   FROM x
+   WHERE

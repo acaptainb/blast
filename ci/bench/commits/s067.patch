@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generators/sqlite.py b/sqlglot/generators/sqlite.py
+--- a/sqlglot/generators/sqlite.py
++++ b/sqlglot/generators/sqlite.py
+@@ -419,7 +419,7 @@
+             this = this.this
+         if isinstance(this, exp.Distinct) and expression.args.get(
+             "separator"
+-        ) == exp.Literal.string(","):
++        ) != exp.Literal.string(","):
+             # DISTINCT aggregates accept one argument; SQLite already defaults to a comma separator.
+             expression.set("separator", None)
+ 

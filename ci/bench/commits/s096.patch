@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -6146,7 +6146,7 @@
+         # Add a NULL FILTER on the column to mimic the results going from a dialect that excludes nulls
+         # on ARRAY_AGG (e.g Spark) to one that doesn't (e.g. DuckDB)
+         if not (
+-            self.dialect.ARRAY_AGG_INCLUDES_NULLS and array_agg_expr.args.get("nulls_excluded")
++            self.dialect.ARRAY_AGG_INCLUDES_NULLS or array_agg_expr.args.get("nulls_excluded")
+         ):
+             return array_agg_sql
+ 

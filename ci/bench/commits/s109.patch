@@ -1,0 +1,12 @@
+diff --git a/sqlglot/optimizer/simplify.py b/sqlglot/optimizer/simplify.py
+--- a/sqlglot/optimizer/simplify.py
++++ b/sqlglot/optimizer/simplify.py
+@@ -584,7 +584,7 @@
+         self.annotate_new_expressions = annotate_new_expressions
+ 
+         self._annotator: TypeAnnotator = TypeAnnotator(
+-            schema=ensure_schema(None, dialect=self.dialect), overwrite_types=False
++            schema=ensure_schema(None, dialect=self.dialect), overwrite_types=True
+         )
+ 
+     # Value ranges for byte-sized signed/unsigned integers

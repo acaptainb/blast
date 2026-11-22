@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generators/singlestore.py b/sqlglot/generators/singlestore.py
+--- a/sqlglot/generators/singlestore.py
++++ b/sqlglot/generators/singlestore.py
+@@ -1552,7 +1552,7 @@
+     def currenttime_sql(self, expression: exp.CurrentTime) -> str:
+         arg = expression.this
+         if arg:
+-            if isinstance(arg, exp.Literal) and arg.name.lower() == "utc":
++            if isinstance(arg, exp.Literal) or arg.name.lower() == "utc":
+                 return self.func("UTC_TIME")
+             if isinstance(arg, exp.Literal) and arg.is_number:
+                 return self.func("CURRENT_TIME", arg)

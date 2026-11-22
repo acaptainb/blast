@@ -185,7 +185,7 @@ def child_main(job, out):
                 emit("F", tid)
             continue
         if duck is not None and path == "tests/test_executor.py":
-            _install_duck_cache(mod, cls, duck, job.get("tpcds_only"))
+            _install_duck_cache(mod, cls, duck, job.get("tpcds_only"), job.get("tpcds_check"))
 
         bad = set()
         class_error = [False]
@@ -252,7 +252,7 @@ def child_main(job, out):
     emit("D", "-")
 
 
-def _install_duck_cache(mod, cls, duck, tpcds_only=None):
+def _install_duck_cache(mod, cls, duck, tpcds_only=None, tpcds_check=None):
     """Serve DuckDB reference results recorded on the pinned commit when the SQL is unchanged."""
     transpile = mod.transpile
 
@@ -293,10 +293,126 @@ def _install_duck_cache(mod, cls, duck, tpcds_only=None):
             # per-query check: every query is still parsed; only the ones that can run a
             # changed line are executed and compared (the others give the pinned result)
             keep = set(tpcds_only)
+            if tpcds_check:
+                keep |= _replan(mod, klass, {int(k): v for k, v in tpcds_check.items()})
             klass.tpcds_sqls = [(m if i in keep else {}, q, e) for i, (m, q, e) in enumerate(klass.tpcds_sqls)]
 
     cls.setUpClass = classmethod(setUpClass)
     del transpile
+
+
+def _replan(mod, klass, check):
+    """Plan each query in `check` with the patched code, exactly as the test does (parse,
+    pickle round trip, mp_execute) but stopping where the executor would start. Returns the
+    queries whose plan differs from the pinned one, or that fail or never reach the executor."""
+    import pickle
+
+    pyexec = sys.modules.get("sqlglot.executor.python")
+    if pyexec is None:
+        import importlib
+
+        pyexec = importlib.import_module("sqlglot.executor.python")
+
+    class _Planned(BaseException):
+        pass
+
+    def stop(self, plan, *a, **k):
+        raise _Planned(executor_fingerprint(self, plan))
+
+    changed = set()
+    orig = pyexec.PythonExecutor.execute
+    pyexec.PythonExecutor.execute = stop
+    try:
+        mod.initializer(mod.TPCDS_SCHEMA, klass.tpcds_tables)
+        for i, fp in sorted(check.items()):
+            meta, sql, _ = klass.tpcds_sqls[i]
+            try:
+                e = pickle.loads(pickle.dumps(mod.parse_one(sql)))
+                mod.mp_execute(e, pickle.loads(pickle.dumps(meta)))
+                changed.add(i)  # finished without reaching the executor: not as on the pinned commit
+            except _Planned as p:
+                if p.args[0] != fp:
+                    changed.add(i)
+            except BaseException:  # noqa: B902  fails while planning: the test will show it
+                changed.add(i)
+    finally:
+        pyexec.PythonExecutor.execute = orig
+    return changed
+
+
+# ----------------------------------------------------------------------------- plan fingerprint
+def executor_fingerprint(executor, plan):
+    """What a PythonExecutor run depends on besides the executor's own code: the plan, and
+    the tables it was handed (names, columns, row counts; their rows come from the fixtures)."""
+
+    def walk(x):
+        if isinstance(x, dict):
+            return "{" + ",".join(sorted(repr(k) + ":" + walk(v) for k, v in x.items())) + "}"
+        cols, rows = getattr(x, "columns", None), getattr(x, "rows", None)
+        if cols is not None and rows is not None:
+            return "TABLE" + repr(tuple(cols)) + str(len(rows))
+        return "?" + type(x).__qualname__
+
+    tables = getattr(executor, "tables", None)
+    return plan_fingerprint(plan) + "|" + walk(getattr(tables, "mapping", tables) or {})
+
+
+def plan_fingerprint(plan):
+    """A canonical digest of a planner.Plan: every step (type, name, attributes, the names of
+    its dependencies) with every expression in full (class, args, type, comments, meta).
+    Uses no sqlglot code, so a patched sqlglot cannot make two different plans look alike;
+    anything not deterministic only makes plans look different (then the query runs)."""
+    import hashlib
+
+    h = hashlib.sha256()
+    expr_cls = None
+    for m in sys.modules.values():
+        c = getattr(m, "Expr", None) if getattr(m, "__name__", "") == "sqlglot.expressions.core" else None
+        if c is not None:
+            expr_cls = c
+            break
+
+    def canon(x, depth=0):
+        if depth > 400:
+            return "<deep>"
+        if x is None or isinstance(x, (bool, int, float, str, bytes)):
+            return repr(x)
+        if isinstance(x, type):
+            return "T:" + x.__module__ + "." + x.__qualname__
+        if expr_cls is not None and isinstance(x, expr_cls):
+            args = getattr(x, "args", {}) or {}
+            parts = [k + "=" + canon(v, depth + 1) for k, v in sorted(args.items(), key=lambda kv: kv[0])]
+            return ("E:" + type(x).__module__ + "." + type(x).__qualname__ + "(" + ",".join(parts)
+                    + ";t=" + canon(getattr(x, "_type", None), depth + 1)
+                    + ";c=" + canon(getattr(x, "comments", None), depth + 1)
+                    + ";m=" + canon(getattr(x, "_meta", None), depth + 1) + ")")
+        if hasattr(x, "dependencies") and hasattr(x, "projections"):  # a planner step
+            return "S:" + repr(getattr(x, "name", None))
+        if isinstance(x, dict):
+            return "{" + ",".join(sorted(canon(k, depth + 1) + ":" + canon(v, depth + 1) for k, v in x.items())) + "}"
+        if isinstance(x, (list, tuple)):
+            return "[" + ",".join(canon(v, depth + 1) for v in x) + "]"
+        if isinstance(x, (set, frozenset)):
+            return "<" + ",".join(sorted(canon(v, depth + 1) for v in x)) + ">"
+        import enum
+
+        if isinstance(x, enum.Enum):
+            return "N:" + type(x).__qualname__ + "." + x.name
+        return "?" + type(x).__qualname__ + ":" + repr(x)
+
+    seen, order, stack = set(), [], [plan.root]
+    while stack:
+        st = stack.pop()
+        if id(st) in seen:
+            continue
+        seen.add(id(st))
+        order.append(st)
+        stack.extend(getattr(st, "dependencies", ()))
+    for st in sorted(order, key=lambda st: repr(getattr(st, "name", None))):
+        attrs = {k: v for k, v in vars(st).items() if k not in ("dependencies", "dependents")}
+        h.update(("STEP " + type(st).__qualname__ + " " + canon(attrs) + " deps="
+                  + canon(sorted(repr(getattr(d, "name", None)) for d in st.dependencies)) + "\n").encode("utf-8", "surrogateescape"))
+    return h.hexdigest()
 
 
 # ----------------------------------------------------------------------------- parent side

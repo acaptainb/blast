@@ -1,0 +1,12 @@
+diff --git a/sqlglot/diff.py b/sqlglot/diff.py
+--- a/sqlglot/diff.py
++++ b/sqlglot/diff.py
+@@ -172,7 +172,7 @@
+     def __init__(self, f: float = 0.6, t: float = 0.6, dialect: DialectType = None) -> None:
+         self.f = f
+         self.t = t
+-        self._sql_generator = Dialect.get_or_raise(dialect).generator(comments=False)
++        self._sql_generator = Dialect.get_or_raise(dialect).generator(comments=True)
+ 
+     def diff(
+         self,

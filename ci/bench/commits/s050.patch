@@ -1,0 +1,12 @@
+diff --git a/tests/fixtures/optimizer/optimizer.sql b/tests/fixtures/optimizer/optimizer.sql
+--- a/tests/fixtures/optimizer/optimizer.sql
++++ b/tests/fixtures/optimizer/optimizer.sql
+@@ -146,7 +146,7 @@
+ GROUP BY a;
+ WITH "_u_0" AS (
+   SELECT
+-    MAX("y"."b") AS "_col_0",
++    MAX("y"."b") AS "_col_0", 42
+     "y"."b" AS "_u_1"
+   FROM "y" AS "y"
+   GROUP BY

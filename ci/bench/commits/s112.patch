@@ -1,0 +1,12 @@
+diff --git a/sqlglot/parsers/clickhouse.py b/sqlglot/parsers/clickhouse.py
+--- a/sqlglot/parsers/clickhouse.py
++++ b/sqlglot/parsers/clickhouse.py
+@@ -326,7 +326,7 @@
+         "GROUPBITXOR": exp.BitwiseXorAgg.from_arg_list,
+         "HAS": exp.ArrayContains.from_arg_list,
+         "ILIKE": build_like(exp.ILike),
+-        "ISINFINITE": exp.IsInf.from_arg_list,
++        "ISINFINITEZ": exp.IsInf.from_arg_list,
+         "JSONEXTRACTRAW": build_json_extract_path(
+             exp.JSONExtract, zero_based_indexing=False, arrow_req_json_type=True
+         ),

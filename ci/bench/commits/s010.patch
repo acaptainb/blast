@@ -1,0 +1,11 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -150,6 +150,7 @@
+         exp.Ceil: lambda self, e: self.ceil_floor(e),
+         exp.CharacterSetColumnConstraint: lambda self, e: f"CHARACTER SET {self.sql(e, 'this')}",
+         exp.CharacterSetProperty: lambda self, e: (
++            # Kept for backwards compatibility
+             f"{'DEFAULT ' if e.args.get('default') else ''}CHARACTER SET={self.sql(e, 'this')}"
+         ),
+         exp.ClusteredColumnConstraint: lambda self, e: (

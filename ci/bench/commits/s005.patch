@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generators/hive.py b/sqlglot/generators/hive.py
+--- a/sqlglot/generators/hive.py
++++ b/sqlglot/generators/hive.py
+@@ -447,7 +447,7 @@
+ 
+         if (
+             is_dialect_strict
+-            and inverse_time_mapping is None
++            and inverse_time_mapping is not None
+             and isinstance(expression, PARSE_TIME_EXPRESSIONS)
+         ):
+             # Render a lenient %m/%d non-padded (M/d) so single-digit sources stay parseable

@@ -1,0 +1,12 @@
+diff --git a/sqlglot/parsers/tsql.py b/sqlglot/parsers/tsql.py
+--- a/sqlglot/parsers/tsql.py
++++ b/sqlglot/parsers/tsql.py
+@@ -816,7 +816,7 @@
+                 table.this.set("global_", True)
+             else:
+                 table.this.set("this", table_name[1:])
+-                table.this.set("temporary", True)
++                table.this.set("temporary", False)
+ 
+         return table
+ 

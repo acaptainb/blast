@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generators/spark.py b/sqlglot/generators/spark.py
+--- a/sqlglot/generators/spark.py
++++ b/sqlglot/generators/spark.py
+@@ -122,7 +122,7 @@
+             ),
+             exp.SafeAdd: rename_func("TRY_ADD"),
+             exp.SafeDivide: rename_func("TRY_DIVIDE"),
+-            exp.SafeMultiply: rename_func("TRY_MULTIPLY"),
++            exp.SafeMultiply: rename_func("TRY_MULTIPLYZ"),
+             exp.SafeSubtract: rename_func("TRY_SUBTRACT"),
+             exp.StartsWith: rename_func("STARTSWITH"),
+             exp.StabilityProperty: lambda self, e: (

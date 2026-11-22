@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generators/singlestore.py b/sqlglot/generators/singlestore.py
+--- a/sqlglot/generators/singlestore.py
++++ b/sqlglot/generators/singlestore.py
+@@ -1536,7 +1536,7 @@
+         # already there (e.g. when regenerating previously generated SQL), don't add
+         # another one, so that generation stays idempotent.
+         this = expression.this
+-        if isinstance(this, exp.Cast) and this.to.this == exp.DType.LONGTEXT:
++        if isinstance(this, exp.Cast) and this.to.this != exp.DType.LONGTEXT:
+             return self.binary(expression, "COLLATE")
+         return self.binary(expression, ":> LONGTEXT COLLATE")
+ 

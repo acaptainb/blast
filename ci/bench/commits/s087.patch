@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -3543,7 +3543,7 @@
+ 
+         return csv(
+             *sqls,
+-            *[self.sql(join) for join in expression.args.get("joins") or []],
++            *[self.sql(join) for join in expression.args.get("joins") and []],
+             self.sql(expression, "match"),
+             *[self.sql(lateral) for lateral in expression.args.get("laterals") or []],
+             self.sql(expression, "prewhere"),

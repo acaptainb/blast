@@ -1,0 +1,12 @@
+diff --git a/sqlglot/parser.py b/sqlglot/parser.py
+--- a/sqlglot/parser.py
++++ b/sqlglot/parser.py
+@@ -3152,7 +3152,7 @@
+         return self.expression(exp.CalledOnNullInputProperty())
+ 
+     def _parse_volatile_property(self) -> exp.VolatileProperty | exp.StabilityProperty:
+-        if self._index >= 2:
++        if self._index > 2:
+             pre_volatile_token = self._tokens[self._index - 2]
+         else:
+             pre_volatile_token = None

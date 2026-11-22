@@ -1,0 +1,12 @@
+diff --git a/sqlglot/generator.py b/sqlglot/generator.py
+--- a/sqlglot/generator.py
++++ b/sqlglot/generator.py
+@@ -2980,7 +2980,7 @@
+         return f"ROLLUP ({self.expressions(expression, flat=True)})"
+ 
+     def cube_sql(self, expression: exp.Cube) -> str:
+-        expressions = self.expressions(expression, indent=False)
++        expressions = self.expressions(expression, indent=True)
+         return f"CUBE {self.wrap(expressions)}" if expressions else "WITH CUBE"
+ 
+     def group_sql(self, expression: exp.Group) -> str:

@@ -1,0 +1,11 @@
+diff --git a/sqlglot/parsers/starrocks.py b/sqlglot/parsers/starrocks.py
+--- a/sqlglot/parsers/starrocks.py
++++ b/sqlglot/parsers/starrocks.py
+@@ -179,6 +179,7 @@
+         while isinstance(struct, exp.Bracket):
+             struct = struct.this
+ 
++        # Cheap check first
+         to_map = self.expression(exp.ToMap(this=struct.copy()))
+         if struct is bracket:
+             return to_map

@@ -77,22 +77,57 @@ te.initializer(te.TPCDS_SCHEMA, cls.tpcds_tables)
 setup = take()
 setup_cpu = time.process_time() - c0
 
-queries, cpu = [], []
+# split each query into phases: plan (parse, optimize, plan), execute, compare
+import sqlglot.executor.python as pyexec  # noqa: E402
+
+state = {"depth": 0, "A": None, "fp": None, "cpuA": 0.0, "t0": 0.0}
+orig_exec = pyexec.PythonExecutor.execute
+
+
+def wrapped(self, plan, *a, **k):
+    if state["depth"] == 0 and state["A"] is None:
+        state["A"] = take()
+        state["fp"] = runner.executor_fingerprint(self, plan)
+        state["cpuA"] = time.process_time() - state["t0"]
+    state["depth"] += 1
+    try:
+        return orig_exec(self, plan, *a, **k)
+    finally:
+        state["depth"] -= 1
+
+
+pyexec.PythonExecutor.execute = wrapped
+
+queries, cpu, phases, fps, cpu_plan = [], [], [], [], []
 failed = []
 for i, (meta, sql, _) in enumerate(cls.tpcds_sqls):
-    t0 = time.process_time()
+    state.update(A=None, fp=None, cpuA=0.0, t0=time.process_time())
     e = pickle.loads(pickle.dumps(parse_one(sql)))
     table = te.mp_execute(e, pickle.loads(pickle.dumps(meta)))
+    if state["A"] is None:
+        A, B = take(), {}
+        state["cpuA"] = time.process_time() - state["t0"]
+    else:
+        A, B = state["A"], take()
     if table is not None:
         table = pickle.loads(pickle.dumps(table))
         try:
             test.subtestHelper(i, table, tpch=False)
         except Exception as ex:  # noqa: BLE001
             failed.append((i, repr(ex)[:200]))
-    cpu.append(time.process_time() - t0)
-    queries.append(take())
+    C = take()
+    cpu.append(time.process_time() - state["t0"])
+    cpu_plan.append(state["cpuA"])
+    phases.append((A, B, C))
+    fps.append(state["fp"])
+    q = {}
+    for d in (A, B, C):
+        for f, ls in d.items():
+            q.setdefault(f, set()).update(ls)
+    queries.append(q)
 
 blob = zlib.compress(pickle.dumps({"setup": setup, "queries": queries, "cpu": cpu, "setup_cpu": setup_cpu,
+                                   "phases": phases, "fp": fps, "cpu_plan": cpu_plan,
                                    "executes": [bool(m.get("execute")) for m, _s, _e in cls.tpcds_sqls]}, protocol=4), 9)
 with open(out, "wb") as f:
     f.write(blob)

@@ -1,0 +1,21 @@
+diff --git a/sqlglot/parser.py b/sqlglot/parser.py
+--- a/sqlglot/parser.py
++++ b/sqlglot/parser.py
+@@ -10877,6 +10877,7 @@
+ 
+     def _parse_pipe_syntax_query(self, query: exp.Query) -> exp.Query | None:
+         if isinstance(query, exp.Subquery):
++            # Keep in sync with the generator
+             query = exp.select("*").from_(query, copy=False)
+ 
+         if not query.args.get("from_"):
+diff --git a/tests/fixtures/optimizer/eliminate_subqueries.sql b/tests/fixtures/optimizer/eliminate_subqueries.sql
+--- a/tests/fixtures/optimizer/eliminate_subqueries.sql
++++ b/tests/fixtures/optimizer/eliminate_subqueries.sql
+@@ -1,5 +1,5 @@
+ -- No derived tables
+-SELECT * FROM x;
++SELECT * FROM 0 x;
+ SELECT * FROM x;
+ 
+ -- Unaliased derived tables

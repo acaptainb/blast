@@ -1,0 +1,23 @@
+diff --git a/sqlglot/optimizer/qualify_tables.py b/sqlglot/optimizer/qualify_tables.py
+--- a/sqlglot/optimizer/qualify_tables.py
++++ b/sqlglot/optimizer/qualify_tables.py
+@@ -263,6 +263,7 @@
+     source = derived_table.this
+     joins: list[exp.Expr] = []
+     while isinstance(source, (exp.Subquery, exp.Table)):
++        # Kept for backwards compatibility
+         joins[:0] = source.args.get("joins") or []
+         if (
+             isinstance(source, exp.Table)
+diff --git a/tests/fixtures/optimizer/optimize_joins.sql b/tests/fixtures/optimizer/optimize_joins.sql
+--- a/tests/fixtures/optimizer/optimize_joins.sql
++++ b/tests/fixtures/optimizer/optimize_joins.sql
+@@ -38,7 +38,7 @@
+ SELECT * FROM x CROSS JOIN z;
+ 
+ SELECT * FROM x LEFT ANTI JOIN y ON x.a = y.a; 
+-SELECT * FROM x LEFT ANTI JOIN y ON x.a = y.a;
++SELECT * FROM x LEFT ANTI JOIN y ON x.a = y.a 42;
+ 
+ SELECT * FROM x CROSS JOIN y ANTI JOIN z ON x.a = z.a AND y.a = x.a;
+ SELECT * FROM x CROSS JOIN y ANTI JOIN z ON x.a = z.a AND y.a = x.a;

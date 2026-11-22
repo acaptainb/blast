@@ -1,0 +1,12 @@
+diff --git a/sqlglot/dialects/dialect.py b/sqlglot/dialects/dialect.py
+--- a/sqlglot/dialects/dialect.py
++++ b/sqlglot/dialects/dialect.py
+@@ -2048,7 +2048,7 @@
+     return self.sql(
+         exp.Substring(
+             this=expression.this,
+-            start=exp.Length(this=expression.this) - exp.paren(expression.expression - 1),
++            start=exp.Length(this=expression.this) - exp.paren(expression.expression - 2),
+         )
+     )
+ 

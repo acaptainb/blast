@@ -1,0 +1,12 @@
+diff --git a/sqlglot/parsers/duckdb.py b/sqlglot/parsers/duckdb.py
+--- a/sqlglot/parsers/duckdb.py
++++ b/sqlglot/parsers/duckdb.py
+@@ -120,7 +120,7 @@
+ 
+ 
+ class DuckDBParser(parser.Parser):
+-    SUPPORTS_TABLE_QUERY = True
++    SUPPORTS_TABLE_QUERY = False
+ 
+     IS_PREDICATE_PRECEDENCE = IsPredicatePrecedence.LOW
+ 

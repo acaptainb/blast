@@ -40,13 +40,24 @@ jobs:
             tail -n 45 stderr.log
             python3 score.py sample sample/answers.json output.jsonl --cpu-seconds "$CPU"
           done
-      - name: Heavy-job smoke test (commits that trigger verification jobs)
+      - name: Practice-sized synthetic set (45 labelled commits) under the scorer's limits
         run: |
-          docker run --rm --platform linux/amd64 --network none --cpus 2 \
-            --memory 4096m --memory-swap 4096m --pids-limit 256 --read-only \
-            --tmpfs /tmp:rw,size=64m,mode=1777 --cap-drop ALL \
-            --security-opt no-new-privileges --user 65534:65534 --env HOME=/tmp \
-            --volume "$PWD/ci/commits:/data/commits:ro" \
-            --volume "$PWD/ci/tests.json:/data/tests.json:ro" blast > ci_out.jsonl 2> ci_err.log; echo "exit=$?"
-          cat ci_err.log
-          wc -c ci_out.jsonl
+          set -u
+          CID=$(docker create --platform linux/amd64 --network none --cpus 2             --memory 4096m --memory-swap 4096m --pids-limit 256 --read-only             --tmpfs /tmp:rw,size=64m,mode=1777 --cap-drop ALL             --security-opt no-new-privileges --user 65534:65534 --env HOME=/tmp             --volume "$PWD/ci/bench/commits:/data/commits:ro"             --volume "$PWD/ci/bench/tests.json:/data/tests.json:ro" blast)
+          START=$(date +%s.%N)
+          docker start "$CID" > /dev/null
+          STAT=""
+          F=$(find /sys/fs/cgroup -type d -name "*$CID*" 2>/dev/null | head -1)
+          while [ "$(docker inspect -f '{{.State.Running}}' "$CID")" = "true" ]; do
+            [ -z "$F" ] && F=$(find /sys/fs/cgroup -type d -name "*$CID*" 2>/dev/null | head -1)
+            S=$(cat "$F/cpu.stat" 2>/dev/null | grep usage_usec || true)
+            [ -n "$S" ] && STAT="$S"
+            sleep 0.02
+          done
+          END=$(date +%s.%N)
+          docker logs "$CID" > bench_out.jsonl 2> bench_err.log
+          docker rm "$CID" > /dev/null
+          CPU=$(python3 -c "print(${STAT##* }/1e6 if '${STAT}' else 0)")
+          echo "wall=$(python3 -c "print(round($END-$START,2))")s cpu=${CPU}s"
+          grep " ran \|skipped\|total wall" bench_err.log
+          python3 score.py ci/bench ci/bench/answers.json bench_out.jsonl --cpu-seconds "$CPU"

@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 repo, maps, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
 seed = int(sys.argv[4]) if len(sys.argv) > 4 else 1
 jobs = int(sys.argv[5]) if len(sys.argv) > 5 else 3
+MODE = sys.argv[6] if len(sys.argv) > 6 else "any"  # "replan": only mutants that use the plan check
 os.environ["BLAST_SG"] = repo
 os.environ["BLAST_MAPS"] = maps
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -62,21 +63,23 @@ for rel, ln in lines:
     for fc in selector.parse_patch(patch):
         selector.file_bits(fc)
     lite = selector.tpcds_lite()
-    if lite is None or len(lite[0]) >= 57:
+    if lite is None or (len(lite[0]) >= 57 and not lite[2]):
         continue
-    muts.append((rel, ln, a, b, ns, lite[0]))
+    if MODE == "replan" and not lite[2]:
+        continue
+    muts.append((rel, ln, a, b, ns, lite[0], lite[2]))
 muts = muts[:n]
 duck = os.path.join(maps, "duck.pkl")
 res_all = []
 
 
 def check(m):
-    rel, ln, a, b, ns, only = m
+    rel, ln, a, b, ns, only, check = m
     base = {"sg": repo, "patched": {rel: ns}, "tests": [selector.TPCDS_ID], "after_fail": [selector.TPCDS_ID], "duck": duck}
-    lite = runner.run_job(dict(base, tpcds_only=only), 600).get(selector.TPCDS_ID, True)
+    lite = runner.run_job(dict(base, tpcds_only=only, tpcds_check={str(k): v for k, v in check.items()}), 600).get(selector.TPCDS_ID, True)
     full = runner.run_job(dict(base), 900).get(selector.TPCDS_ID, True)
     flag = "MISS" if full and not lite else "ok"
-    print(f"{flag} {rel}:{ln} {a.strip()!r}->{b.strip()!r} queries={len(only)} lite_fail={lite} full_fail={full}", flush=True)
+    print(f"{flag} {rel}:{ln} {a.strip()!r}->{b.strip()!r} execute={len(only)} replan={len(check)} lite_fail={lite} full_fail={full}", flush=True)
     res_all.append(flag)
 
 

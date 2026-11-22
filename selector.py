@@ -107,19 +107,21 @@ def openers(rel):
 _ref_cache = {}
 
 
-def refcov(name):
-    """Tests that executed a function-body line which reads `name`."""
-    b = _ref_cache.get(name)
+def refcov(name, prefix=""):
+    """Tests that executed a function-body line which reads `name` (in files under prefix)."""
+    b = _ref_cache.get((name, prefix))
     if b is None:
         b = 0
         for f, lines in S["refs"].get(name, {}).items():
+            if not f.startswith(prefix):
+                continue
             d = M["ffiles"].get(f)
             if d:
                 for ln in lines:
                     r = d.get(ln)
                     if r is not None:
                         b |= row(r)
-        _ref_cache[name] = b
+        _ref_cache[(name, prefix)] = b
     return b
 
 
@@ -432,6 +434,9 @@ def scope_stmt_bits(rel, s, path):
                         users |= row(r)
                 for o in outer:
                     users |= refcov(o)
+                # tests that read the attribute off a class themselves (e.g. looping over dialects)
+                for nm in names:
+                    users |= refcov(nm, "tests/")
                 load &= users
     # independently: a constant is read by code that names it (both are supersets: intersect)
     users = 0

@@ -92,7 +92,11 @@ for ckey, sub in csubs.items():
 refs = {}
 modattr = {}  # attribute name -> [(file, line, text of the object it is read from)] at module level
 modrefs = {}  # identifier -> number of reads at module / class level (outside any function)
-for root, _dirs, files in os.walk(os.path.join(repo, "sqlglot")):
+import itertools  # noqa: E402
+
+for root, _dirs, files in itertools.chain(os.walk(os.path.join(repo, "sqlglot")), os.walk(os.path.join(repo, "tests"))):
+    if os.sep + "fixtures" in root:
+        continue
     for fn in files:
         if not fn.endswith(".py"):
             continue

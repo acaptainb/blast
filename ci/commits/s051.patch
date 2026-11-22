@@ -1,0 +1,12 @@
+diff --git a/sqlglot/parser.py b/sqlglot/parser.py
+--- a/sqlglot/parser.py
++++ b/sqlglot/parser.py
+@@ -9200,7 +9200,7 @@
+         return {
+             "value": (
+                 (self._match_text_seq("UNBOUNDED") and "UNBOUNDED")
+-                or (self._match_text_seq("CURRENT", "ROW") and "CURRENT ROW")
++                or (self._match_text_seq("CURRENT", "ROW") or "CURRENT ROW")
+                 or self._parse_bitwise()
+             ),
+             "side": self._prev.text if self._match_texts(self.WINDOW_SIDES) else None,

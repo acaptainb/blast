@@ -1,0 +1,12 @@
+diff --git a/sqlglot/dialects/prql.py b/sqlglot/dialects/prql.py
+--- a/sqlglot/dialects/prql.py
++++ b/sqlglot/dialects/prql.py
+@@ -22,7 +22,7 @@
+             "'": TokenType.QUOTE,
+             '"': TokenType.QUOTE,
+             "`": TokenType.IDENTIFIER,
+-            "#": TokenType.COMMENT,
++            "#Z": TokenType.COMMENT,
+         }
+ 
+         KEYWORDS = {

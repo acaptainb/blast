@@ -1,0 +1,12 @@
+diff --git a/sqlglot/parser.py b/sqlglot/parser.py
+--- a/sqlglot/parser.py
++++ b/sqlglot/parser.py
+@@ -6977,7 +6977,7 @@
+                 self._retreat(index)
+                 return None
+ 
+-            maybe_func = True
++            maybe_func = False
+ 
+         values: list[exp.Expr] | None = None
+ 

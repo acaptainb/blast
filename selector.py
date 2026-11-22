@@ -421,18 +421,19 @@ def scope_stmt_bits(rel, s, path):
             # an instance of the class, a subclass, or a dialect that uses one of them, or by
             # code that names one of these classes. Unless another module body copies it.
             outer = {k.split(":")[1].split(".")[0] for k in fam} | {classes[0].name}
-            for nm in names:
-                for _f, _ln, txt in S["modattr"].get(nm, ()):
-                    if set(re.findall(r"\w+", txt)) & outer:
-                        return load
-            users = 0
-            for k in fam:
-                r = M["inst"].get(k)
-                if r is not None:
-                    users |= row(r)
-            for o in outer:
-                users |= refcov(o)
-            return load & users
+            copied = any(
+                set(re.findall(r"\w+", txt)) & outer for nm in names for _f, _ln, txt in S["modattr"].get(nm, ())
+            )
+            if not copied:
+                users = 0
+                for k in fam:
+                    r = M["inst"].get(k)
+                    if r is not None:
+                        users |= row(r)
+                for o in outer:
+                    users |= refcov(o)
+                load &= users
+    # independently: a constant is read by code that names it (both are supersets: intersect)
     users = 0
     for nm in names:
         if not _CONST_NAME.match(nm):

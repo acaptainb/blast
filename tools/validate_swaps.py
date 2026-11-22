@@ -69,7 +69,7 @@ for rel, line, col in sites:
     for fc in selector.parse_patch(patch):
         bits |= selector.file_bits(fc)
     picked = {bit2id[i] for i in range(selector.NBITS) if bits >> i & 1}
-    res = runner.run_job({"sg": repo, "patched": {rel: new_src}, "tests": cov_ids, "duck": os.path.join(maps, "duck.pkl")}, 300)
+    res = runner.run_job({"sg": repo, "patched": {rel: new_src}, "tests": cov_ids, "after_fail": cov_ids, "duck": os.path.join(maps, "duck.pkl")}, 300)
     failing = {t for t, f in res.items() if f}
     unfinished = set(cov_ids) - set(res)
     missed = failing - picked

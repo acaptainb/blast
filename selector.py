@@ -1,0 +1,664 @@
+#!/usr/bin/env python3
+"""Blast-radius selector.
+
+For every patch: work out which statements of the pinned sqlglot checkout really
+changed, look up which tests execute those statements (maps/depmap.bin, built from
+the pinned commit by tools/build_map.py), and print those tests packed into workers.
+
+Nothing here is keyed by a patch or by a kind of edit: the only inputs are the diff
+itself, the pinned sources and dependency maps of the pinned commit.
+"""
+
+import ast
+import copy
+import json
+import os
+import pickle
+import re
+import sys
+import zlib
+
+DATA = os.environ.get("BLAST_DATA", "/data")
+SG = os.environ.get("BLAST_SG", "/app/sg")
+MAPS = os.environ.get("BLAST_MAPS", "/app/maps")
+
+WORKER_MS = 2000
+MAX_WORKERS = 8
+
+
+def log(*a):
+    print(*a, file=sys.stderr, flush=True)
+
+
+# --------------------------------------------------------------------------- maps
+def _load(name):
+    with open(os.path.join(MAPS, name), "rb") as f:
+        return pickle.loads(zlib.decompress(f.read()))
+
+
+M = _load("depmap.bin")
+S = _load("static.bin")
+ROWS = M["rows"]
+NBITS = len(M["tests"])
+ALL = (1 << NBITS) - 1
+_row_cache = {}
+
+
+def row(i):
+    v = _row_cache.get(i)
+    if v is None:
+        v = _row_cache[i] = int.from_bytes(ROWS[i], "little")
+    return v
+
+
+def cov(rel, lo, hi, level="any"):
+    """Tests that executed any line lo..hi of a file. level: mod (import time), fn, any."""
+    b = 0
+    if level != "fn":
+        d = M["files"].get(rel)
+        if d:
+            for ln in range(lo, hi + 1):
+                r = d.get(ln)
+                if r is not None:
+                    b |= row(r)
+    if level != "mod":
+        d = M["ffiles"].get(rel)
+        if d:
+            for ln in range(lo, hi + 1):
+                r = d.get(ln)
+                if r is not None:
+                    b |= row(r)
+    return b
+
+
+_file_cache = {}
+
+
+def loaders(rel):
+    """Tests that import the module (ran any of its module / class level lines)."""
+    k = ("L", rel)
+    if k not in _file_cache:
+        b = 0
+        for r in set(M["files"].get(rel, {}).values()):
+            b |= row(r)
+        _file_cache[k] = b
+    return _file_cache[k]
+
+
+def touchers(rel):
+    k = ("T", rel)
+    if k not in _file_cache:
+        b = loaders(rel)
+        for r in set(M["ffiles"].get(rel, {}).values()):
+            b |= row(r)
+        _file_cache[k] = b
+    return _file_cache[k]
+
+
+def openers(rel):
+    r = M["opened"].get(rel)
+    return row(r) if r is not None else 0
+
+
+_ref_cache = {}
+
+
+def refcov(name):
+    """Tests that executed a function-body line which reads `name`."""
+    b = _ref_cache.get(name)
+    if b is None:
+        b = 0
+        for f, lines in S["refs"].get(name, {}).items():
+            d = M["ffiles"].get(f)
+            if d:
+                for ln in lines:
+                    r = d.get(ln)
+                    if r is not None:
+                        b |= row(r)
+        _ref_cache[name] = b
+    return b
+
+
+# --------------------------------------------------------------------------- patch parsing
+class FileChange:
+    def __init__(self):
+        self.old_path = None
+        self.new_path = None
+        self.is_new = False
+        self.is_deleted = False
+        self.rename_from = None
+        self.rename_to = None
+        self.binary = False
+        self.hunks = []  # (old_start, old_len, new_start, new_len, body_lines)
+
+
+_HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def _strip(p):
+    p = p.split("\t")[0].strip()
+    if p.startswith('"') and p.endswith('"'):
+        p = p[1:-1]
+    if p[:2] in ("a/", "b/"):
+        p = p[2:]
+    return p
+
+
+def parse_patch(text):
+    lines = text.split("\n")
+    files = []
+    cur = None
+    i = 0
+    n = len(lines)
+    while i < n:
+        ln = lines[i]
+        if ln.startswith("diff --git "):
+            cur = FileChange()
+            files.append(cur)
+            m = re.match(r"diff --git a/(.*?) b/(.*)$", ln)
+            if m:
+                cur.old_path, cur.new_path = m.group(1), m.group(2)
+            i += 1
+            continue
+        if ln.startswith("--- ") and i + 1 < n and lines[i + 1].startswith("+++ "):
+            if cur is None or cur.hunks:
+                cur = FileChange()
+                files.append(cur)
+            a, b = _strip(ln[4:]), _strip(lines[i + 1][4:])
+            if a == "/dev/null":
+                cur.is_new = True
+            else:
+                cur.old_path = a
+            if b == "/dev/null":
+                cur.is_deleted = True
+            else:
+                cur.new_path = b
+            i += 2
+            continue
+        if cur is not None:
+            if ln.startswith("new file mode"):
+                cur.is_new = True
+            elif ln.startswith("deleted file mode"):
+                cur.is_deleted = True
+            elif ln.startswith("rename from "):
+                cur.rename_from = ln[12:].strip()
+            elif ln.startswith("rename to "):
+                cur.rename_to = ln[10:].strip()
+            elif ln.startswith("Binary files ") or ln.startswith("GIT binary patch"):
+                cur.binary = True
+            elif ln.startswith("@@"):
+                m = _HUNK.match(ln)
+                if m:
+                    a = int(m.group(1))
+                    al = 1 if m.group(2) is None else int(m.group(2))
+                    b = int(m.group(3))
+                    bl = 1 if m.group(4) is None else int(m.group(4))
+                    i += 1
+                    body = []
+                    oc = nc = 0
+                    while i < n and (oc < al or nc < bl):
+                        h = lines[i]
+                        c = h[:1]
+                        if c == "\\":
+                            body.append(h)
+                            i += 1
+                            continue
+                        if c == "-":
+                            oc += 1
+                        elif c == "+":
+                            nc += 1
+                        else:
+                            oc += 1
+                            nc += 1
+                        body.append(h)
+                        i += 1
+                    if i < n and lines[i].startswith("\\"):
+                        body.append(lines[i])
+                        i += 1
+                    cur.hunks.append((a, al, b, bl, body))
+                    continue
+        i += 1
+    return files
+
+
+def apply_hunks(old_text, hunks):
+    """Apply hunks to old_text. Returns (new_text, ok)."""
+    old = old_text.split("\n")
+    out = []
+    pos = 0
+    ok = True
+    drop_final_newline = False
+    add_final_newline = False
+    for a, al, _b, _bl, body in hunks:
+        start = a - 1 if al > 0 else a
+        if start < pos or start > len(old):
+            return old_text, False
+        out.extend(old[pos:start])
+        pos = start
+        prev = " "
+        for h in body:
+            c = h[:1]
+            t = h[1:]
+            if c == "\\":
+                if prev == "+":
+                    drop_final_newline = True
+                elif prev == "-":
+                    add_final_newline = True
+                else:
+                    drop_final_newline = False
+                continue
+            if c == "+":
+                out.append(t)
+            elif c == "-":
+                if pos >= len(old) or old[pos] != t:
+                    ok = False
+                pos += 1
+            else:
+                if pos < len(old):
+                    if old[pos] != t and old[pos].rstrip() != t.rstrip():
+                        ok = False
+                    out.append(old[pos])
+                else:
+                    ok = False
+                pos += 1
+            prev = c
+    out.extend(old[pos:])
+    if drop_final_newline and out and out[-1] == "":
+        out.pop()
+    if add_final_newline and (not out or out[-1] != ""):
+        out.append("")
+    return "\n".join(out), ok
+
+
+def change_groups(hunks):
+    """-> [(removed [(old_line, text)], added [(new_line, text)])] for each run of -/+ lines."""
+    groups = []
+    for a, al, b, bl, body in hunks:
+        o = a if al > 0 else a + 1
+        nw = b if bl > 0 else b + 1
+        rem, add = [], []
+        for h in body:
+            c = h[:1]
+            if c == "\\":
+                continue
+            if c == "-":
+                rem.append((o, h[1:]))
+                o += 1
+            elif c == "+":
+                add.append((nw, h[1:]))
+                nw += 1
+            else:
+                if rem or add:
+                    groups.append((rem, add))
+                    rem, add = [], []
+                o += 1
+                nw += 1
+        if rem or add:
+            groups.append((rem, add))
+    return groups
+
+
+# --------------------------------------------------------------------------- python analysis
+_DEF = (ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+def stmt_lo(s):
+    return min([d.lineno for d in getattr(s, "decorator_list", [])] + [s.lineno])
+
+
+def child_bodies(s):
+    for f in ("body", "orelse", "finalbody"):
+        v = getattr(s, f, None)
+        if isinstance(v, list):
+            yield v
+    for h in getattr(s, "handlers", None) or ():
+        yield h.body
+    for c in getattr(s, "cases", None) or ():
+        yield c.body
+
+
+def locate(body, line, path):
+    """Append to path the chain of statements (outermost first) that contain `line`."""
+    for s in body:
+        if stmt_lo(s) <= line <= s.end_lineno:
+            path.append(s)
+            for cb in child_bodies(s):
+                if locate(cb, line, path):
+                    break
+            return True
+    return False
+
+
+def string_lines(tree):
+    """Lines that lie inside a multi-line string literal (a '#' there is not a comment)."""
+    out = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Constant, ast.JoinedStr)) and node.end_lineno > node.lineno:
+            if isinstance(node, ast.JoinedStr) or isinstance(node.value, (str, bytes)):
+                out.update(range(node.lineno, node.end_lineno + 1))
+    return out
+
+
+def significant(lines, strs):
+    out = []
+    for ln, txt in lines:
+        t = txt.strip()
+        if (t and not t.startswith("#")) or ln in strs:
+            out.append((ln, txt))
+    return out
+
+
+def indent(txt):
+    return len(txt) - len(txt.lstrip())
+
+
+class _MaskLambdas(ast.NodeTransformer):
+    def visit_Lambda(self, node):
+        return ast.Lambda(args=node.args, body=ast.Constant(value=0))
+
+
+def masked_dump(s):
+    return ast.dump(_MaskLambdas().visit(copy.deepcopy(s)))
+
+
+def is_docstring(s, parent_body):
+    return (
+        isinstance(s, ast.Expr)
+        and isinstance(s.value, ast.Constant)
+        and isinstance(s.value.value, str)
+        and parent_body
+        and parent_body[0] is s
+    )
+
+
+def target_names(s):
+    names = []
+    targets = []
+    if isinstance(s, ast.Assign):
+        targets = s.targets
+    elif isinstance(s, (ast.AnnAssign, ast.AugAssign)):
+        targets = [s.target]
+    else:
+        return None
+    for t in targets:
+        if isinstance(t, ast.Name):
+            names.append(t.id)
+        else:
+            return None
+    return names or None
+
+
+_CONST_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+def scope_stmt_bits(rel, s, path):
+    """A simple statement that runs at import time, directly in a module or class body."""
+    load = cov(rel, s.lineno, s.end_lineno, "mod")
+    names = target_names(s)
+    if not names:
+        return load
+    classes = [p for p in path if isinstance(p, ast.ClassDef)]
+    if classes and rel.endswith(".py"):
+        ckey = rel[:-3].replace("/", ".") + ":" + ".".join(c.name for c in classes)
+        subs = S["subs"].get(ckey)
+        if subs is not None:
+            # An expression class: its attributes are only reachable through an instance
+            # of the class (or a subclass), or through code that names the class.
+            users = 0
+            for k in subs:
+                r = M["inst"].get(k)
+                if r is not None:
+                    users |= row(r)
+                users |= refcov(k.split(":")[1].split(".")[-1])
+            return load & users
+    users = 0
+    for nm in names:
+        if not _CONST_NAME.match(nm):
+            return load
+        if nm not in S["refs"] or S["modrefs"].get(nm, 0) > 0:
+            return load
+        users |= refcov(nm)
+    return load & users
+
+
+def find_def(tree, qual):
+    body = tree.body
+    node = None
+    for name in qual:
+        node = None
+        for s in body:
+            if isinstance(s, _DEF + (ast.ClassDef,)) and s.name == name:
+                node = s
+        if node is None:
+            return None
+        body = node.body
+    return node
+
+
+def analyze_py(rel, old_text, new_text, hunks, patch_ok):
+    try:
+        ot = ast.parse(old_text.encode("utf-8", "surrogateescape"))
+    except Exception:
+        return touchers(rel) | openers(rel)
+    try:
+        nt = ast.parse(new_text.encode("utf-8", "surrogateescape"))
+    except Exception:
+        # the module no longer compiles: every test that imports it breaks
+        return touchers(rel) | openers(rel)
+    if patch_ok and ast.dump(ot) == ast.dump(nt):
+        # same program (comments / layout only): only tests that read the file as data can notice
+        return openers(rel)
+    if not patch_ok:
+        return touchers(rel) | openers(rel)
+
+    ostr, nstr = string_lines(ot), string_lines(nt)
+    bits = openers(rel)
+    for rem, add in change_groups(hunks):
+        srem = significant(rem, ostr)
+        sadd = significant(add, nstr)
+        if not srem and not sadd:
+            continue
+        for r, _txt in srem:
+            bits |= mark_old_line(rel, ot, nt, r, srem, sadd)
+        if sadd and (not srem or indent(srem[0][1]) != indent(sadd[0][1]) or len(sadd) != len(srem)):
+            bits |= mark_insertion(rel, ot, nt, sadd)
+    return bits
+
+
+def mark_old_line(rel, ot, nt, r, srem, sadd):
+    path = []
+    locate(ot.body, r, path)
+    if not path:
+        return loaders(rel)
+    s = path[-1]
+    parent_body = path[-2].body if len(path) > 1 and isinstance(getattr(path[-2], "body", None), list) else ot.body
+    in_func = any(isinstance(p, _DEF) for p in path[:-1])
+    if isinstance(s, _DEF):
+        if r < s.lineno:  # a decorator
+            return cov(rel, stmt_lo(s), s.end_lineno, "any")
+        return cov(rel, stmt_lo(s), s.end_lineno, "fn")  # signature: whoever runs the body
+    if isinstance(s, ast.ClassDef):
+        return cov(rel, stmt_lo(s), s.end_lineno, "any")
+    if isinstance(getattr(s, "body", None), list):  # if / for / while / with / try / match header or clause
+        return cov(rel, s.lineno, s.end_lineno, "any")
+    # a simple statement
+    if is_docstring(s, parent_body):
+        return 0
+    if sadd:
+        npath = []
+        locate(nt.body, sadd[0][0], npath)
+        if npath and type(npath[-1]) is type(s):
+            try:
+                same_outside = masked_dump(s) == masked_dump(npath[-1])
+            except Exception:
+                same_outside = False
+            if same_outside:
+                # the statements differ only inside lambda bodies: only running a lambda can show it
+                lams = [
+                    n
+                    for n in ast.walk(s)
+                    if isinstance(n, ast.Lambda) and n.lineno <= r <= n.end_lineno
+                ]
+                if lams:
+                    b = 0
+                    for lam in lams:
+                        b |= cov(rel, lam.lineno, lam.end_lineno, "fn")
+                    return b
+    if not in_func:
+        return scope_stmt_bits(rel, s, path)
+    return cov(rel, s.lineno, s.end_lineno, "any")
+
+
+def mark_insertion(rel, ot, nt, sadd):
+    npath = []
+    locate(nt.body, sadd[0][0], npath)
+    last_def = None
+    for i, p in enumerate(npath):
+        if isinstance(p, _DEF):
+            last_def = i
+    if last_def is None:
+        return loaders(rel)
+    qual = [p.name for p in npath[: last_def + 1] if isinstance(p, _DEF + (ast.ClassDef,))]
+    if len(qual) != last_def + 1:
+        return loaders(rel)  # the function sits under an if/try at module level: stay coarse
+    old_def = find_def(ot, qual)
+    if old_def is None or not isinstance(old_def, _DEF):
+        return loaders(rel)  # a brand new function may override an inherited one
+    return cov(rel, stmt_lo(old_def), old_def.end_lineno, "fn")
+
+
+# --------------------------------------------------------------------------- per file
+PYTEST_FILES = {"pytest.ini", "tox.ini", ".pytest.ini", "conftest.py"}
+
+
+def read_old(rel):
+    p = os.path.join(SG, rel)
+    try:
+        with open(p, "rb") as f:
+            return f.read().decode("utf-8", "surrogateescape")
+    except OSError:
+        return None
+
+
+def dir_openers(rel):
+    d = rel.rsplit("/", 1)[0] + "/" if "/" in rel else ""
+    b = 0
+    for f, r in M["opened"].items():
+        if f.startswith(d) and "/" not in f[len(d):]:
+            b |= row(r)
+    return b
+
+
+def file_bits(fc):
+    bits = 0
+    old_rel = fc.rename_from or fc.old_path
+    new_rel = fc.rename_to or fc.new_path
+    rel = old_rel or new_rel
+    if rel is None:
+        return ALL
+    base = rel.rsplit("/", 1)[-1]
+    if base in PYTEST_FILES or (new_rel and new_rel.rsplit("/", 1)[-1] in PYTEST_FILES):
+        return ALL
+    old_text = read_old(old_rel) if old_rel and not fc.is_new else None
+
+    if fc.is_deleted or (fc.rename_from and fc.rename_to and fc.rename_from != fc.rename_to):
+        bits |= touchers(old_rel) | openers(old_rel)
+        if not fc.is_deleted:
+            bits |= new_file_bits(new_rel)
+        return bits
+    if old_text is None:  # a file the pinned commit does not have
+        return new_file_bits(new_rel or rel)
+    if fc.binary:
+        return touchers(rel) | openers(rel)
+    if not fc.hunks:
+        return 0  # mode change only
+
+    new_text, ok = apply_hunks(old_text, fc.hunks)
+    if rel.endswith(".py"):
+        return analyze_py(rel, old_text, new_text, fc.hunks, ok)
+    if base in ("pyproject.toml", "setup.cfg"):
+        added = "\n".join(h[1:] for _a, _al, _b, _bl, body in fc.hunks for h in body if h[:1] == "+")
+        if "pytest" in added or "pytest" in new_text and "pytest" not in old_text:
+            return ALL
+    if new_text == old_text and ok:
+        return 0
+    return openers(rel)
+
+
+def new_file_bits(rel):
+    if rel is None:
+        return ALL
+    base = rel.rsplit("/", 1)[-1]
+    if base in PYTEST_FILES:
+        return ALL
+    if rel.endswith(".py"):
+        if "/" not in rel:
+            return ALL  # the checkout root is on sys.path: a new module there can shadow anything
+        if rel.startswith("sqlglot/"):
+            return dir_openers(rel)
+        return 0
+    return openers(rel) | dir_openers(rel)
+
+
+# --------------------------------------------------------------------------- packing
+def split(nums, ms):
+    if not nums:
+        return []
+    items = sorted(nums, key=lambda t: -ms[t])
+    total = sum(ms[t] for t in items)
+    big = ms[items[0]]
+    best = None
+    for k in range(1, min(MAX_WORKERS, len(items)) + 1):
+        lower = max(big, -(-total // k)) + WORKER_MS * k
+        if best is not None and lower >= best[0]:
+            continue
+        loads = [0] * k
+        ws = [[] for _ in range(k)]
+        for t in items:
+            j = loads.index(min(loads))
+            loads[j] += ms[t]
+            ws[j].append(t)
+        c = max(loads) + WORKER_MS * k
+        if best is None or c < best[0]:
+            best = (c, ws)
+    return best[1]
+
+
+# --------------------------------------------------------------------------- main
+def main():
+    with open(os.path.join(DATA, "tests.json"), encoding="utf-8") as f:
+        tests = json.load(f)["tests"]
+    ms = {t["number"]: int(t["seconds"] * 1000 + 0.5) for t in tests}
+    id2num = {t["id"]: t["number"] for t in tests}
+    bit_num = [id2num.get(tid) for tid in M["tests"]]
+    known = set(M["tests"])
+    unknown = [t["number"] for t in tests if t["id"] not in known]
+    all_nums = sorted(ms)
+
+    cdir = os.path.join(DATA, "commits")
+    out = []
+    for name in sorted(os.listdir(cdir)):
+        if not name.endswith(".patch"):
+            continue
+        cid = name[: -len(".patch")]
+        try:
+            with open(os.path.join(cdir, name), "rb") as f:
+                text = f.read().decode("utf-8", "surrogateescape")
+            bits = 0
+            for fc in parse_patch(text):
+                bits |= file_bits(fc)
+            nums = [bit_num[i] for i in range(NBITS) if bits >> i & 1 and bit_num[i] is not None]
+            if bits:
+                nums += unknown
+        except Exception as e:  # never lose a commit: fall back to running everything
+            log(f"{cid}: analysis failed ({e!r}); selecting every test")
+            nums = all_nums
+        workers = split(sorted(set(nums)), ms)
+        out.append(json.dumps({"commit": cid, "workers": workers}, separators=(",", ":")))
+        log(f"{cid}: {len(nums)} tests, {len(workers)} workers")
+    sys.stdout.write("\n".join(out) + ("\n" if out else ""))
+    sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main()

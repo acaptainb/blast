@@ -1,0 +1,42 @@
+name: sample
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  sample:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: docker build --platform linux/amd64 --tag blast .
+      - name: Run under the scorer's limits (3 runs) and score
+        run: |
+          set -u
+          for run in 1 2 3; do
+            CID=$(docker create --platform linux/amd64 --network none --cpus 2 \
+              --memory 4096m --memory-swap 4096m --pids-limit 256 --read-only \
+              --tmpfs /tmp:rw,size=64m,mode=1777 --cap-drop ALL \
+              --security-opt no-new-privileges --user 65534:65534 --env HOME=/tmp \
+              --volume "$PWD/sample/commits:/data/commits:ro" \
+              --volume "$PWD/sample/tests.json:/data/tests.json:ro" blast)
+            START=$(date +%s.%N)
+            docker start "$CID" > /dev/null
+            STAT=""
+            F=$(find /sys/fs/cgroup -type d -name "*$CID*" 2>/dev/null | head -1)
+            while [ "$(docker inspect -f '{{.State.Running}}' "$CID")" = "true" ]; do
+              [ -z "$F" ] && F=$(find /sys/fs/cgroup -type d -name "*$CID*" 2>/dev/null | head -1)
+              S=$(cat "$F/cpu.stat" 2>/dev/null | grep usage_usec || true)
+              [ -n "$S" ] && STAT="$S"
+              sleep 0.02
+            done
+            END=$(date +%s.%N)
+            CODE=$(docker inspect -f '{{.State.ExitCode}}' "$CID")
+            docker logs "$CID" > output.jsonl 2> stderr.log
+            docker rm "$CID" > /dev/null
+            USEC=$(echo "$STAT" | awk '{print $2}')
+            CPU=$(python3 -c "print(${USEC:-0}/1e6)")
+            echo "=== run $run: exit=$CODE wall=$(python3 -c "print(round($END-$START,2))")s cpu=${CPU}s stdout=$(wc -c < output.jsonl) bytes"
+            tail -n 45 stderr.log
+            python3 score.py sample sample/answers.json output.jsonl --cpu-seconds "$CPU"
+          done

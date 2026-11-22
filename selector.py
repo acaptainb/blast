@@ -454,6 +454,7 @@ def scope_stmt_bits(rel, s, path):
 
 
 _BODY_FIELDS = {"body", "orelse", "finalbody", "handlers", "cases"}
+DICTS = os.environ.get("BLAST_DICTS", "0") == "1"  # dict-entry proofs: off until fully mutation-checked
 ANDOR = os.environ.get("BLAST_ANDOR", "0") == "1"  # and/or swap proofs: off until fully mutation-checked
 _SWAP = {
     frozenset(("Is", "Eq")): "eqis",
@@ -622,7 +623,7 @@ def mark_old_line(rel, ot, nt, r, srem, sadd):
     if sw is not None:
         return sw
     dbits = ALL  # dict-entry readers (ALL when that does not apply); intersected below
-    if not in_func and s_new is not None and len(srem) == len(sadd):
+    if DICTS and not in_func and s_new is not None and len(srem) == len(sadd):
         db = dict_bits(rel, s, s_new, path)
         if db is not None:
             dbits = db
@@ -639,8 +640,11 @@ def mark_old_line(rel, ot, nt, r, srem, sadd):
                 same_outside = masked_dump(s) == masked_dump(npath[-1])
             except Exception:
                 same_outside = False
-            if same_outside:
-                # the statements differ only inside lambda bodies: only running a lambda can show it
+            if same_outside and in_func:
+                # the statements differ only inside lambda bodies: only running a lambda can show it.
+                # Only inside a function body: line tracing never reports the first line of a lambda
+                # whose line also runs at class / module level (one-line table entries), so there
+                # the lambda would look as if no test ever ran it.
                 lams = [
                     n
                     for n in ast.walk(s)

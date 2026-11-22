@@ -46,6 +46,33 @@ try:
     DPROF = _load("dictprof.bin")
 except OSError:
     DPROF = {}
+try:
+    ATTR = _load("attrprof.bin")
+except OSError:
+    ATTR = None
+ATTRS = os.environ.get("BLAST_ATTRS", "1") == "1"
+
+
+def attr_bits(ckey, names):
+    """Tests that read one of these class constants from this class (via the MRO), or None
+    when that cannot be shown: the name is read dynamically by string somewhere, read at
+    module / class level (a derived value), or read while importing."""
+    if not ATTRS or ATTR is None:
+        return None
+    bits = 0
+    for nm in names:
+        if nm in ATTR["strings"] or S["modrefs"].get(nm, 0) > 0:
+            return None
+        e = ATTR["reads"].get((ckey, nm))
+        if e is None:
+            continue
+        if e["global"]:
+            return None
+        for t in e["tests"]:
+            bits |= 1 << t
+    for t in ATTR["unsure"]:
+        bits |= 1 << t
+    return bits
 ROWS = M["rows"]
 NBITS = len(M["tests"])
 ALL = (1 << NBITS) - 1
@@ -403,6 +430,17 @@ _CONST_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 def scope_stmt_bits(rel, s, path):
     """A simple statement that runs at import time, directly in a module or class body."""
+    bits = _scope_stmt_bits(rel, s, path)
+    names = target_names(s)
+    classes = [p.name for p in path if isinstance(p, ast.ClassDef)]
+    if names and classes and rel.endswith(".py") and all(_CONST_NAME.match(n) for n in names):
+        ab = attr_bits(rel[:-3].replace("/", ".") + ":" + ".".join(classes), names)
+        if ab is not None:
+            bits &= ab
+    return bits
+
+
+def _scope_stmt_bits(rel, s, path):
     load = cov(rel, s.lineno, s.end_lineno, "mod")
     names = target_names(s)
     if not names:

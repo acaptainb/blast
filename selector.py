@@ -1051,7 +1051,7 @@ HEAVY_MARGIN = float(os.environ.get("BLAST_HEAVY_MARGIN", "1.0"))
 HEAVY = os.environ.get("BLAST_HEAVY", "1") == "1"
 
 
-PLANCHECK = os.environ.get("BLAST_PLANCHECK", "0") == "1"  # re-plan shortcut: off by default, not clearly cheaper on the sample
+PLANCHECK = os.environ.get("BLAST_PLANCHECK", "1") == "1"  # re-plan shortcut (50/50 mutation-checked)
 TPCDS_EXTRA = float(os.environ.get("BLAST_TPCDS_EXTRA", "4.0"))  # cpu allowed for queries whose plan changed
 
 

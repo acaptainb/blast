@@ -43,7 +43,9 @@ jobs:
       - name: Practice-sized synthetic set (45 labelled commits) under the scorer's limits
         run: |
           set -u
-          CID=$(docker create --platform linux/amd64 --network none --cpus 2             --memory 4096m --memory-swap 4096m --pids-limit 256 --read-only             --tmpfs /tmp:rw,size=64m,mode=1777 --cap-drop ALL             --security-opt no-new-privileges --user 65534:65534 --env HOME=/tmp             --volume "$PWD/ci/bench/commits:/data/commits:ro"             --volume "$PWD/ci/bench/tests.json:/data/tests.json:ro" blast)
+          for EXTRA in "--env BLAST_VERIFY=1" "--env BLAST_VERIFY=0"; do
+          echo "=== 45-commit set, $EXTRA"
+          CID=$(docker create $EXTRA --platform linux/amd64 --network none --cpus 2             --memory 4096m --memory-swap 4096m --pids-limit 256 --read-only             --tmpfs /tmp:rw,size=64m,mode=1777 --cap-drop ALL             --security-opt no-new-privileges --user 65534:65534 --env HOME=/tmp             --volume "$PWD/ci/bench/commits:/data/commits:ro"             --volume "$PWD/ci/bench/tests.json:/data/tests.json:ro" blast)
           START=$(date +%s.%N)
           docker start "$CID" > /dev/null
           STAT=""
@@ -61,3 +63,4 @@ jobs:
           echo "wall=$(python3 -c "print(round($END-$START,2))")s cpu=${CPU}s"
           grep " ran \|skipped\|total wall" bench_err.log
           python3 score.py ci/bench ci/bench/answers.json bench_out.jsonl --cpu-seconds "$CPU"
+          done

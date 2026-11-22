@@ -192,6 +192,7 @@ def child_main(job, out):
 
         class Result(unittest.TestResult):
             def startTest(self, test):
+                _SUBTEST_FAILED[0] = False
                 super().startTest(test)
                 emit("S", f"{path}::{clsname}::{test._testMethodName}")
 
@@ -214,6 +215,7 @@ def child_main(job, out):
                 super().addSubTest(test, subtest, err)
                 if err is not None:
                     self._mark(test)
+                    _SUBTEST_FAILED[0] = True
 
             def addUnexpectedSuccess(self, test):
                 super().addUnexpectedSuccess(test)
@@ -252,8 +254,55 @@ def child_main(job, out):
     emit("D", "-")
 
 
+_SUBTEST_FAILED = [False]  # the running test already has a failed subtest
+
+
 def _install_duck_cache(mod, cls, duck, tpcds_only=None, tpcds_check=None):
-    """Serve DuckDB reference results recorded on the pinned commit when the SQL is unchanged."""
+    """Serve DuckDB reference results recorded on the pinned commit when the SQL is unchanged.
+
+    Also runs the executor tests' process pool lazily: a query executes when the test asks
+    for its result, and once a subtest of the running test has failed (the test's outcome
+    is settled) the remaining queries are not executed."""
+    import pickle as _pickle
+
+    class _LazyFuture:
+        def __init__(self, fn, a, k):
+            self._call = (fn, _pickle.loads(_pickle.dumps((a, k))))
+            self._done = False
+            self._value = self._exc = None
+
+        def result(self, timeout=None):
+            if not self._done:
+                self._done = True
+                fn, (a, k) = self._call
+                if not _SUBTEST_FAILED[0]:
+                    try:
+                        self._value = _pickle.loads(_pickle.dumps(fn(*a, **k)))
+                    except BaseException as e:  # noqa: B902
+                        self._exc = e
+            if self._exc is not None:
+                raise self._exc
+            return self._value
+
+    class _LazyPool:
+        def __init__(self, max_workers=None, mp_context=None, initializer=None, initargs=()):
+            if initializer:
+                initializer(*initargs)
+
+        def submit(self, fn, *a, **k):
+            return _LazyFuture(fn, a, k)
+
+        def shutdown(self, wait=True, cancel_futures=False):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    if getattr(mod, "ProcessPoolExecutor", None) is not None:
+        mod.ProcessPoolExecutor = _LazyPool
     transpile = mod.transpile
 
     class Cached:

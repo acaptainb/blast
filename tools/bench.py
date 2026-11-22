@@ -278,6 +278,8 @@ def evaluate():
     env = dict(os.environ, BLAST_DATA=out)
     env.setdefault("BLAST_VERIFY", "0")
     p = subprocess.run([sys.executable, os.path.join(here, "selector.py")], env=env, capture_output=True)
+    open(os.path.join(out, "eval_out.jsonl"), "wb").write(p.stdout)
+    open(os.path.join(out, "eval_err.log"), "wb").write(p.stderr)
     est = sum(float(m.group(1)) for m in re.finditer(r"est ([0-9.]+)s", p.stderr.decode()))
     print(f"verification jobs: {p.stderr.decode().count(' ran ')}, estimated cpu {est:.1f}s")
     rows = []

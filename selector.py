@@ -19,8 +19,8 @@ import sys
 import zlib
 
 DATA = os.environ.get("BLAST_DATA", "/data")
-SG = os.environ.get("BLAST_SG", "/app/sg")
-MAPS = os.environ.get("BLAST_MAPS", "/app/maps")
+SG = os.path.abspath(os.environ.get("BLAST_SG", "/app/sg"))
+MAPS = os.path.abspath(os.environ.get("BLAST_MAPS", "/app/maps"))
 
 WORKER_MS = 2000
 MAX_WORKERS = 8

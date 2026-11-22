@@ -29,7 +29,8 @@ num2id = {t["number"]: t["id"] for t in tests}
 bit2id = selector.M["tests"]
 cpu = selector.CPU["tests"]
 
-sites = sorted(selector.CMP["sites"])
+MODE = sys.argv[6] if len(sys.argv) > 6 else "cmp"  # "cmp" or "andor"
+sites = sorted(k[:3] for k in selector.CMP["sites"] if k[3] == ("B" if MODE == "andor" else "C"))
 rng = random.Random(seed)
 rng.shuffle(sites)
 done = bad = proven = 0
@@ -39,16 +40,27 @@ for rel, line, col in sites:
     src = open(os.path.join(repo, rel), encoding="utf-8").read()
     lines = src.split("\n")
     tree = ast.parse(src)
-    node = next((x for x in ast.walk(tree) if isinstance(x, ast.Compare) and x.lineno == line and x.col_offset == col), None)
-    if node is None or node.left.end_lineno != line or node.comparators[0].lineno != line:
-        continue
-    op = type(node.ops[0]).__name__
     text = lines[line - 1]
-    a, b = node.left.end_col_offset, node.comparators[0].col_offset
-    seg = text[a:b]
-    if seg.strip() not in ("is", "is not", "==", "!=", "<", "<=", ">", ">="):
-        continue
-    new = text[:a] + " " + SWAP[op].strip() + " " + text[b:]
+    if MODE == "andor":
+        node = next((x for x in ast.walk(tree) if isinstance(x, ast.BoolOp) and x.lineno == line and x.col_offset == col), None)
+        if node is None or len(node.values) != 2 or node.values[0].end_lineno != line or node.values[1].lineno != line:
+            continue
+        op = type(node.op).__name__
+        a, b = node.values[0].end_col_offset, node.values[1].col_offset
+        seg = text[a:b].strip()
+        if seg not in ("and", "or"):
+            continue
+        new = text[:a] + (" or " if seg == "and" else " and ") + text[b:]
+    else:
+        node = next((x for x in ast.walk(tree) if isinstance(x, ast.Compare) and x.lineno == line and x.col_offset == col), None)
+        if node is None or node.left.end_lineno != line or node.comparators[0].lineno != line:
+            continue
+        op = type(node.ops[0]).__name__
+        a, b = node.left.end_col_offset, node.comparators[0].col_offset
+        seg = text[a:b]
+        if seg.strip() not in ("is", "is not", "==", "!=", "<", "<=", ">", ">="):
+            continue
+        new = text[:a] + " " + SWAP[op].strip() + " " + text[b:]
     new_lines = lines[:]
     new_lines[line - 1] = new
     new_src = "\n".join(new_lines)
@@ -77,6 +89,6 @@ for rel, line, col in sites:
     proven += len(picked) < len(cov_ids)
     flag = "MISS" if missed else "ok"
     bad += bool(missed)
-    print(f"{flag} {rel}:{line} {op}->{SWAP[op].strip()} covering={len(cov_ids)} picked={len(picked)} failing={len(failing)} unfinished={len(unfinished)}"
+    print(f"{flag} {rel}:{line} {op}->{'swap' if MODE == 'andor' else SWAP[op].strip()} covering={len(cov_ids)} picked={len(picked)} failing={len(failing)} unfinished={len(unfinished)}"
           + (f" missed={sorted(missed)[:3]}" if missed else ""), flush=True)
 print(f"checked {done}, narrowed {proven}, misses {bad}")

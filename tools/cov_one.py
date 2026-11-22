@@ -52,6 +52,10 @@ _real_open = builtins.open
 _real_open_code = io.open_code
 
 
+hopened = set()  # opened by tests/helpers.py fixture loaders (their use is tracked per entry)
+HELPER_LOADERS = {"load_sql_fixture_pairs", "load_sql_fixtures"}
+
+
 def _note(path):
     try:
         if isinstance(path, int):
@@ -60,7 +64,12 @@ def _note(path):
         if isinstance(p, bytes):
             p = p.decode("utf-8", "replace")
         if p.startswith(prefix):
-            opened.add(p[len(prefix):].replace("\\", "/"))
+            rel = p[len(prefix):].replace("\\", "/")
+            f = sys._getframe(2)
+            if f.f_code.co_name in HELPER_LOADERS and f.f_code.co_filename.replace("\\", "/").endswith("tests/helpers.py"):
+                hopened.add(rel)
+            else:
+                opened.add(rel)
     except Exception:
         pass
 
@@ -155,6 +164,108 @@ def _recording_new(base):
 for _base in (_tokens.Tokenizer, _parser.Parser, _generator.Generator, _dialect.Dialect):
     _recording_new(_base)
 
+# ---- fixture entries actually used ---------------------------------------------
+fx = set()
+
+
+def _rec(key):
+    if key is not None:
+        fx.add(key)
+
+
+class TrackStr(str):
+    """A fixture string that records when anything reads it."""
+
+    def __new__(cls, value, key):
+        o = str.__new__(cls, value)
+        o.__dict__["_k"] = key
+        return o
+
+    def __getattribute__(self, name):
+        if name not in ("__dict__", "__class__"):
+            _rec(str.__getattribute__(self, "__dict__").get("_k"))
+        return str.__getattribute__(self, name)
+
+
+def _str_dunder(name):
+    base = getattr(str, name)
+
+    def f(self, *a):
+        _rec(str.__getattribute__(self, "__dict__").get("_k"))
+        return base(self, *a)
+
+    f.__name__ = name
+    return f
+
+
+for _n in ("__getitem__", "__iter__", "__len__", "__contains__", "__eq__", "__ne__", "__lt__", "__le__",
+           "__gt__", "__ge__", "__hash__", "__add__", "__mul__", "__rmul__", "__mod__", "__format__",
+           "__str__", "__repr__", "__sizeof__"):
+    setattr(TrackStr, _n, _str_dunder(_n))
+
+
+def _radd(self, other):
+    _rec(str.__getattribute__(self, "__dict__").get("_k"))
+    return other + str(self)
+
+
+TrackStr.__radd__ = _radd
+
+
+def _newargs(self):
+    _rec(str.__getattribute__(self, "__dict__").get("_k"))
+    return (str.__str__(self), str.__getattribute__(self, "__dict__")["_k"])
+
+
+TrackStr.__getnewargs__ = _newargs
+
+
+class TrackDict(dict):
+    def __init__(self, value=(), key=None):
+        dict.__init__(self, value)
+        if key is not None:
+            self.__dict__["_k"] = key
+
+    def __getattribute__(self, name):
+        if name not in ("__dict__", "__class__"):
+            _rec(dict.__getattribute__(self, "__dict__").get("_k"))
+        return dict.__getattribute__(self, name)
+
+
+def _dict_dunder(name):
+    base = getattr(dict, name)
+
+    def f(self, *a):
+        _rec(dict.__getattribute__(self, "__dict__").get("_k"))
+        return base(self, *a)
+
+    f.__name__ = name
+    return f
+
+
+for _n in ("__getitem__", "__iter__", "__len__", "__contains__", "__eq__", "__ne__", "__repr__", "__or__"):
+    setattr(TrackDict, _n, _dict_dunder(_n))
+TrackDict.__hash__ = None
+
+import tests.helpers as _helpers  # noqa: E402
+
+_orig_pairs = _helpers.load_sql_fixture_pairs
+_orig_fixtures = _helpers.load_sql_fixtures
+
+
+def load_sql_fixture_pairs(filename):
+    for i, (meta, sql, expected) in enumerate(_orig_pairs(filename)):
+        yield TrackDict(meta, (filename, i, "m")), TrackStr(sql, (filename, i, "s")), TrackStr(expected, (filename, i, "e"))
+
+
+def load_sql_fixtures(filename):
+    for i, sql in enumerate(_orig_fixtures(filename)):
+        yield TrackStr(sql, (filename, i, "f"))
+
+
+_helpers.load_sql_fixture_pairs = load_sql_fixture_pairs
+_helpers.load_sql_fixtures = load_sql_fixtures
+
 path, clsname, meth = test_id.split("::")
 outcome, msg = "pass", ""
 c0 = time.process_time()
@@ -194,6 +305,8 @@ with _real_open(out_path, "w") as f:
             "cov": cov,
             "covf": covf,
             "opened": sorted(opened),
+            "hopened": sorted(hopened),
+            "fx": sorted(list(k) for k in fx),
             "inst": sorted(f"{c.__module__}:{c.__qualname__}" for c in inst),
         },
         f,

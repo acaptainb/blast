@@ -46,6 +46,8 @@ with ThreadPoolExecutor(jobs) as pool:
 lines = {}  # file -> line -> bitset   (module / class level execution)
 flines = {}  # file -> line -> bitset  (execution inside function bodies)
 opened = {}
+hopened = {}
+fx = {}
 inst = {}
 cpu = []
 bad = []
@@ -66,6 +68,11 @@ for i, tid in enumerate(tests):
                 d[ln] = d.get(ln, 0) | bit
     for f in r["opened"]:
         opened[f] = opened.get(f, 0) | bit
+    for f in r.get("hopened", ()):
+        hopened[f] = hopened.get(f, 0) | bit
+    for k in r.get("fx", ()):
+        k = tuple(k)
+        fx[k] = fx.get(k, 0) | bit
     for c in r["inst"]:
         inst[c] = inst.get(c, 0) | bit
     cpu.append(r["cpu_test"])
@@ -87,6 +94,8 @@ m = {
     "files": {f: {ln: rid(b) for ln, b in d.items()} for f, d in lines.items()},
     "ffiles": {f: {ln: rid(b) for ln, b in d.items()} for f, d in flines.items()},
     "opened": {f: rid(b) for f, b in opened.items()},
+    "hopened": {f: rid(b) for f, b in hopened.items()},
+    "fx": {k: rid(b) for k, b in fx.items()},
     "inst": {c: rid(b) for c, b in inst.items()},
     "rows": rows,
     "cpu": cpu,

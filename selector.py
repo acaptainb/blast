@@ -464,6 +464,9 @@ def op_swaps(a, b, out, top=True):
     if type(a) is not type(b):
         return False
     if isinstance(a, ast.AST):
+        if isinstance(a, ast.BoolOp) and len(a.values) == 2 and len(b.values) == 2 and type(a.op) is not type(b.op):
+            out.append((a, "andor"))
+            return op_swaps(a.values, b.values, out, False)
         if isinstance(a, ast.Compare) and len(a.ops) == 1 and len(b.ops) == 1 and type(a.ops[0]) is not type(b.ops[0]):
             kind = _SWAP.get(frozenset((type(a.ops[0]).__name__, type(b.ops[0]).__name__)))
             if kind is None:
@@ -491,11 +494,11 @@ def swap_bits(rel, s_old, s_new):
     sites = CMP["sites"]
     bits = 0
     for node, kind in swaps:
-        key = (rel, node.lineno, node.col_offset)
+        key = (rel, node.lineno, node.col_offset, "B" if kind == "andor" else "C")
         if key not in sites:
             return None
         e = cases.get(key)
-        hit = e[kind] if e else []
+        hit = e.get(kind, -1) if e else []
         if hit == -1:
             return None
         for i in hit:
@@ -619,6 +622,101 @@ def mark_insertion(rel, ot, nt, sadd):
     return cov(rel, stmt_lo(old_def), old_def.end_lineno, "fn")
 
 
+# --------------------------------------------------------------------------- fixture entries
+FIXDIR = "tests/fixtures/"
+
+
+def _filter_comments(text):  # tests/helpers.py, pinned commit
+    return "\n".join([line for line in text.splitlines() if line and not line.startswith("--")])
+
+
+def _extract_meta(sql):  # tests/helpers.py, pinned commit
+    meta = {}
+    sql_lines = sql.split("\n")
+    i = 0
+    while sql_lines[i].startswith("#"):
+        key, val = sql_lines[i].split(":", maxsplit=1)
+        meta[key.lstrip("#").strip()] = val.strip()
+        i += 1
+    sql = "\n".join(sql_lines[i:])
+    return sql, meta
+
+
+def fixture_pairs(text):
+    """What load_sql_fixture_pairs yields for this text, or None if it would raise."""
+    try:
+        statements = _filter_comments(text).split(";")
+        out = []
+        for i in range(0, len(statements), 2):
+            if i + 1 < len(statements):
+                sql, meta = _extract_meta(statements[i].strip())
+                out.append((meta, sql, statements[i + 1].strip()))
+        return out
+    except Exception:
+        return None
+
+
+def fixture_lines(text):
+    """What load_sql_fixtures yields for this text."""
+    out, lines = [], []
+    for line in _filter_comments(text).splitlines():
+        lines.append(line)
+        if not line.startswith("#"):
+            out.append("\n".join(lines))
+            lines.clear()
+    return out
+
+
+_fx_index = None
+
+
+def fx_index():
+    global _fx_index
+    if _fx_index is None:
+        _fx_index = {}
+        for (name, i, role), r in M.get("fx", {}).items():
+            _fx_index.setdefault(name, {})[(i, role)] = r
+    return _fx_index
+
+
+def fixture_bits(rel, old_text, new_text):
+    """Tests that read a changed entry of a fixture through the test helpers, plus tests
+    that read the file any other way."""
+    bits = openers(rel)  # read outside the helpers
+    hr = M.get("hopened", {}).get(rel)
+    if hr is None:
+        return bits
+    idx = fx_index().get(rel[len(FIXDIR):], {})
+    pair_users = fix_users = 0
+    for (i, role), r in idx.items():
+        if role == "f":
+            fix_users |= row(r)
+        else:
+            pair_users |= row(r)
+    # load_sql_fixture_pairs
+    op, np_ = fixture_pairs(old_text), fixture_pairs(new_text)
+    if op is None or np_ is None or len(op) != len(np_):
+        bits |= row(hr)  # entries shift, or the loader raises: every test that loads it
+    else:
+        for i, (a, b) in enumerate(zip(op, np_)):
+            for role, x, y in (("m", a[0], b[0]), ("s", a[1], b[1]), ("e", a[2], b[2])):
+                if x != y:
+                    r = idx.get((i, role))
+                    if r is not None:
+                        bits |= row(r)
+    # load_sql_fixtures
+    ol, nl = fixture_lines(old_text), fixture_lines(new_text)
+    if len(ol) != len(nl):
+        bits |= fix_users
+    else:
+        for i, (x, y) in enumerate(zip(ol, nl)):
+            if x != y:
+                r = idx.get((i, "f"))
+                if r is not None:
+                    bits |= row(r)
+    return bits
+
+
 # --------------------------------------------------------------------------- per file
 PYTEST_FILES = {"pytest.ini", "tox.ini", ".pytest.ini", "conftest.py"}
 
@@ -674,7 +772,9 @@ def file_bits(fc):
             return ALL
     if new_text == old_text and ok:
         return 0
-    return openers(rel)
+    if ok and rel.startswith(FIXDIR) and "fx" in M:
+        return fixture_bits(rel, old_text, new_text)
+    return openers(rel) | (row(M["hopened"][rel]) if rel in M.get("hopened", {}) else 0)
 
 
 def new_file_bits(rel):

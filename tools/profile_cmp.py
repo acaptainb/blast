@@ -24,6 +24,22 @@ from concurrent.futures import ThreadPoolExecutor
 OPS = (ast.Is, ast.IsNot, ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)
 
 
+PURE_CALLS = {"isinstance", "len", "hasattr", "type", "issubclass", "bool", "callable", "__blast_cmp__", "__blast_bool__"}
+
+
+def _pure(e):
+    """No side effects when evaluated (so it may be evaluated where the original skips it).
+    Calls are allowed only to a few builtins; every other call may change state."""
+    for x in ast.walk(e):
+        if isinstance(x, ast.Call):
+            if not (isinstance(x.func, ast.Name) and x.func.id in PURE_CALLS):
+                return False
+        elif isinstance(x, (ast.NamedExpr, ast.Yield, ast.YieldFrom, ast.Await, ast.Lambda,
+                            ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            return False
+    return True
+
+
 class Rewrite(ast.NodeTransformer):
     def __init__(self, rel, sites):
         self.rel = rel
@@ -37,6 +53,51 @@ class Rewrite(ast.NodeTransformer):
         return node
 
     visit_FunctionDef = visit_AsyncFunctionDef = visit_Lambda = _func
+
+    # --- and / or in a boolean context (if / while / ternary / assert / not / comprehension if)
+    def _bool_ok(self, node):
+        if not (self.depth and isinstance(node, ast.BoolOp) and len(node.values) == 2):
+            return False
+        for x in ast.walk(node):
+            if isinstance(x, (ast.NamedExpr, ast.Yield, ast.YieldFrom, ast.Await, ast.Starred)):
+                return False
+            if isinstance(x, ast.Name) and x.id == "super":
+                return False
+        return True
+
+    def _wrap_bool(self, node):
+        if not self._bool_ok(node):
+            return node
+        sid = len(self.sites)
+        self.sites.append((self.rel, node.lineno, node.col_offset, "BOOL_" + type(node.op).__name__))
+        lam = lambda e: ast.Lambda(  # noqa: E731
+            args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]), body=e
+        )
+        call = ast.Call(
+            func=ast.Name(id="__blast_bool__", ctx=ast.Load()),
+            args=[ast.Constant(sid), lam(node.values[0]), lam(node.values[1]), ast.Constant(isinstance(node.op, ast.And)),
+                  ast.Constant(_pure(node.values[1]))],
+            keywords=[],
+        )
+        return ast.copy_location(call, node)
+
+    def _test_holder(self, node):
+        self.generic_visit(node)
+        node.test = self._wrap_bool(node.test)
+        return node
+
+    visit_If = visit_While = visit_IfExp = visit_Assert = _test_holder
+
+    def visit_UnaryOp(self, node):
+        self.generic_visit(node)
+        if isinstance(node.op, ast.Not):
+            node.operand = self._wrap_bool(node.operand)
+        return node
+
+    def visit_comprehension(self, node):
+        self.generic_visit(node)
+        node.ifs = [self._wrap_bool(x) for x in node.ifs]
+        return node
 
     def visit_Compare(self, node):
         self.generic_visit(node)
@@ -82,7 +143,9 @@ def child(repo, job_path, out_path):
         try:
             if op in ("Is", "IsNot", "Eq", "NotEq"):
                 ident = a is b
-                if op == "Eq":
+                if not isinstance(r, bool):
+                    e = None  # overloaded operator: never claim the swap is invisible
+                elif op == "Eq":
                     e = r
                 elif isinstance(a, EXPR) or isinstance(b, EXPR):
                     # comparing trees is expensive; reflexive when identical, otherwise assume
@@ -93,8 +156,10 @@ def child(repo, job_path, out_path):
                 if not isinstance(e, bool) or e != ident:
                     note(eqis, sid)
             else:
+                # an overloaded operator (e.g. sqlglot expressions build an LT node) returns
+                # something else than a bool: swapping it changes the result outright
                 e = a == b
-                if not isinstance(e, bool) or e:
+                if not isinstance(r, bool) or not isinstance(e, bool) or e:
                     note(bound, sid)
         except Exception:
             note(eqis, sid)
@@ -102,6 +167,37 @@ def child(repo, job_path, out_path):
         return r
 
     builtins.__blast_cmp__ = blast_cmp
+    andor = {}
+
+    def blast_bool(sid, fa, fb, is_and, pure):
+        """Original semantics of `a and b` / `a or b`; notes when the other operator would
+        give a different truth value (evaluating b where the original short-circuits)."""
+        a = fa()
+        if bool(a) == (not is_and):
+            # short-circuit: `and` with falsy a / `or` with truthy a. The swapped operator
+            # would also evaluate b: its truth decides whether the outcome changes. Only a
+            # side-effect-free b may be evaluated here; otherwise the swap counts as visible.
+            if not pure:
+                note(andor, sid)
+                return a
+            try:
+                bb = bool(fb())
+                if bb == is_and:
+                    note(andor, sid)
+            except Exception:
+                note(andor, sid)
+            return a
+        b = fb()
+        try:
+            # `and` with truthy a -> bool(b); `or` would give True.  `or` with falsy a -> bool(b);
+            # `and` would give False. They differ when bool(b) disagrees.
+            if bool(b) != is_and:
+                note(andor, sid)
+        except Exception:
+            note(andor, sid)
+        return b
+
+    builtins.__blast_bool__ = blast_bool
     EXPR = ()
 
     def _late_expr():
@@ -182,7 +278,7 @@ def child(repo, job_path, out_path):
             sys.__stderr__.write(f"BASELINE FAIL {tid} (did not report)\n")
             unsure.add(index[tid])
     with open(out_path, "wb") as f:
-        pickle.dump({"sites": sites, "eqis": eqis, "bound": bound, "unsure": sorted(unsure)}, f)
+        pickle.dump({"sites": sites, "eqis": eqis, "bound": bound, "andor": andor, "unsure": sorted(unsure)}, f)
     os._exit(0)
 
 
@@ -228,20 +324,20 @@ def main():
             raise SystemExit(f"missing profile part {k}")
         r = pickle.load(open(res, "rb"))
         sites = r["sites"]
-        instrumented.update((rel, line, col) for rel, line, col, _op in sites)
+        instrumented.update((rel, line, col, "B" if op.startswith("BOOL_") else "C") for rel, line, col, op in sites)
         if r.get("unsure"):
             for sid in range(len(sites)):
-                for kind in ("eqis", "bound"):
-                    r[kind].setdefault(sid, set()).update(r["unsure"])
-        for kind in ("eqis", "bound"):
-            for sid, tests_ in r[kind].items():
+                for kind in ("eqis", "bound", "andor"):
+                    r.setdefault(kind, {}).setdefault(sid, set()).update(r["unsure"])
+        for kind in ("eqis", "bound", "andor"):
+            for sid, tests_ in r.get(kind, {}).items():
                 rel, line, col, op = sites[sid]
-                key = (rel, line, col)
-                e = prof.setdefault(key, {"op": op, "eqis": set(), "bound": set()})
+                key = (rel, line, col, "B" if op.startswith("BOOL_") else "C")
+                e = prof.setdefault(key, {"op": op, "eqis": set(), "bound": set(), "andor": set()})
                 e[kind] |= tests_
                 seen_any += 1
     for e in prof.values():
-        for kind in ("eqis", "bound"):
+        for kind in ("eqis", "bound", "andor"):
             e[kind] = -1 if -1 in e[kind] else sorted(e[kind])
     blob = zlib.compress(pickle.dumps({"cases": prof, "sites": instrumented}, protocol=4), 9)
     with open(out, "wb") as f:

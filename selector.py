@@ -1051,7 +1051,13 @@ HEAVY_MARGIN = float(os.environ.get("BLAST_HEAVY_MARGIN", "1.0"))
 HEAVY = os.environ.get("BLAST_HEAVY", "1") == "1"
 
 
-PLANCHECK = os.environ.get("BLAST_PLANCHECK", "1") == "1"
+PLANCHECK = os.environ.get("BLAST_PLANCHECK", "0") == "1"  # re-plan shortcut: off by default, not clearly cheaper on the sample
+TPCDS_EXTRA = float(os.environ.get("BLAST_TPCDS_EXTRA", "4.0"))  # cpu allowed for queries whose plan changed
+
+
+def tpcds_costs():
+    T = lazy("tpcds.bin")
+    return {str(i): c for i, c in enumerate(T["cpu"])}
 
 
 def tpcds_lite():
@@ -1253,7 +1259,10 @@ def main():
                 est += hest
         commits.append({"cid": cid, "cands": nums, "run": run, "after": after, "est": est, "patched": patched,
                         "tpcds_only": lite[0] if lite and TPCDS_ID in run else None,
-                        "tpcds_check": lite[2] if lite and TPCDS_ID in run else None})
+                        "tpcds_check": lite[2] if lite and TPCDS_ID in run else None,
+                        "tpcds_cost": tpcds_costs() if lite and TPCDS_ID in run and lite[2] else None,
+                        "tpcds_max": (sum(tpcds_costs()[str(i)] for i in lite[0]) + TPCDS_EXTRA)
+                        if lite and TPCDS_ID in run and lite[2] else None})
 
     def saving(c):
         return pack_cost(c["cands"], ms) - pack_cost(sorted(set(c["cands"]) - {id2num[t] for t in c["run"]}), ms) - c["est"]
@@ -1268,7 +1277,8 @@ def main():
     def job_of(c):
         return {"sg": SG, "patched": c["patched"], "tests": c["run"], "after_fail": c["after"], "duck": duck,
                 "tpcds_only": c.get("tpcds_only"),
-                "tpcds_check": {str(k): v for k, v in (c.get("tpcds_check") or {}).items()}}
+                "tpcds_check": {str(k): v for k, v in (c.get("tpcds_check") or {}).items()},
+                "tpcds_cost": c.get("tpcds_cost"), "tpcds_max": c.get("tpcds_max")}
 
     def timeout_of(c, left):
         return min(max(20.0, 3 * c["est"] + 10), max(5.0, left - 5))

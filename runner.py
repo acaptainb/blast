@@ -185,7 +185,8 @@ def child_main(job, out):
                 emit("F", tid)
             continue
         if duck is not None and path == "tests/test_executor.py":
-            _install_duck_cache(mod, cls, duck, job.get("tpcds_only"), job.get("tpcds_check"))
+            _install_duck_cache(mod, cls, duck, job.get("tpcds_only"), job.get("tpcds_check"),
+                                job.get("tpcds_cost"), job.get("tpcds_max"))
 
         bad = set()
         class_error = [False]
@@ -257,7 +258,7 @@ def child_main(job, out):
 _SUBTEST_FAILED = [False]  # the running test already has a failed subtest
 
 
-def _install_duck_cache(mod, cls, duck, tpcds_only=None, tpcds_check=None):
+def _install_duck_cache(mod, cls, duck, tpcds_only=None, tpcds_check=None, tpcds_cost=None, tpcds_max=None):
     """Serve DuckDB reference results recorded on the pinned commit when the SQL is unchanged.
 
     Also runs the executor tests' process pool lazily: a query executes when the test asks
@@ -344,6 +345,12 @@ def _install_duck_cache(mod, cls, duck, tpcds_only=None, tpcds_check=None):
             keep = set(tpcds_only)
             if tpcds_check:
                 keep |= _replan(mod, klass, {int(k): v for k, v in tpcds_check.items()})
+                if tpcds_max is not None and tpcds_cost:
+                    need = sum(tpcds_cost.get(str(i), 1.0) for i in keep)
+                    if need > tpcds_max:
+                        # many plans changed: running them all costs more than including the
+                        # test. Give up: the class setup fails, so the test counts as failing.
+                        raise RuntimeError(f"per-query check abandoned: {need:.1f}s of queries to run")
             klass.tpcds_sqls = [(m if i in keep else {}, q, e) for i, (m, q, e) in enumerate(klass.tpcds_sqls)]
 
     cls.setUpClass = classmethod(setUpClass)

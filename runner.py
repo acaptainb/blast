@@ -185,7 +185,7 @@ def child_main(job, out):
                 emit("F", tid)
             continue
         if duck is not None and path == "tests/test_executor.py":
-            _install_duck_cache(mod, cls, duck)
+            _install_duck_cache(mod, cls, duck, job.get("tpcds_only"))
 
         bad = set()
         class_error = [False]
@@ -252,7 +252,7 @@ def child_main(job, out):
     emit("D", "-")
 
 
-def _install_duck_cache(mod, cls, duck):
+def _install_duck_cache(mod, cls, duck, tpcds_only=None):
     """Serve DuckDB reference results recorded on the pinned commit when the SQL is unchanged."""
     transpile = mod.transpile
 
@@ -289,6 +289,11 @@ def _install_duck_cache(mod, cls, duck):
         orig_setup(klass)
         klass.tpch_conn = Conn(klass.tpch_conn, "tpch")
         klass.tpcds_conn = Conn(klass.tpcds_conn, "tpcds")
+        if tpcds_only is not None:
+            # per-query check: every query is still parsed; only the ones that can run a
+            # changed line are executed and compared (the others give the pinned result)
+            keep = set(tpcds_only)
+            klass.tpcds_sqls = [(m if i in keep else {}, q, e) for i, (m, q, e) in enumerate(klass.tpcds_sqls)]
 
     cls.setUpClass = classmethod(setUpClass)
     del transpile

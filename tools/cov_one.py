@@ -40,8 +40,21 @@ def _on_line(code, line):
     return mon.DISABLE
 
 
+def _on_start(code, offset):
+    # A lambda (or one-line function) whose first line also runs as class / module code gets
+    # no LINE event for that line when it is called: record its first line on every start.
+    fn = code.co_filename
+    ok = _ok.get(fn)
+    if ok is None:
+        ok = _ok[fn] = fn.startswith(prefix)
+    if ok:
+        seen.add((fn, code.co_firstlineno, 1))
+    return mon.DISABLE
+
+
 mon.register_callback(TOOL, mon.events.LINE, _on_line)
-mon.set_events(TOOL, mon.events.LINE)
+mon.register_callback(TOOL, mon.events.PY_START, _on_start)
+mon.set_events(TOOL, mon.events.LINE | mon.events.PY_START)
 
 # ---- opened files ---------------------------------------------------------
 import builtins  # noqa: E402

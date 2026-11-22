@@ -454,8 +454,8 @@ def scope_stmt_bits(rel, s, path):
 
 
 _BODY_FIELDS = {"body", "orelse", "finalbody", "handlers", "cases"}
-DICTS = os.environ.get("BLAST_DICTS", "0") == "1"  # dict-entry proofs: off until fully mutation-checked
-ANDOR = os.environ.get("BLAST_ANDOR", "0") == "1"  # and/or swap proofs: off until fully mutation-checked
+DICTS = os.environ.get("BLAST_DICTS", "1") == "1"  # dict-entry proofs (60/60 mutation-checked)
+ANDOR = os.environ.get("BLAST_ANDOR", "1") == "1"  # and/or swap proofs (60/60 mutation-checked)
 _SWAP = {
     frozenset(("Is", "Eq")): "eqis",
     frozenset(("IsNot", "NotEq")): "eqis",
@@ -569,20 +569,62 @@ def find_def(tree, qual):
     return node
 
 
+# Source lines a commit can affect, for the per-query TPC-DS check: {file: lines}, or "all".
+TOUCH = {"lines": {}, "all": False, "tpcds_idx": set()}
+
+
+def touch_reset():
+    TOUCH["lines"] = {}
+    TOUCH["all"] = False
+    TOUCH["tpcds_idx"] = set()
+
+
+def touch_all():
+    TOUCH["all"] = True
+
+
+def touch(rel, lo, hi):
+    TOUCH["lines"].setdefault(rel, set()).update(range(lo, hi + 1))
+
+
+def touch_stmt(rel, ot, r):
+    path = []
+    locate(ot.body, r, path)
+    if not path:
+        touch_all()
+        return
+    st = path[-1]
+    in_def = any(isinstance(p, _DEF) for p in path[:-1])
+    if not in_def and not isinstance(st, _DEF):
+        touch_all()  # module / class level: anything may follow
+        return
+    if isinstance(st, _DEF):
+        touch(rel, stmt_lo(st), st.end_lineno)
+    elif isinstance(getattr(st, "body", None), list) and st.body:
+        # a compound statement's header (or else / except / finally clause line)
+        touch(rel, st.lineno, max(st.lineno, st.body[0].lineno - 1))
+        touch(rel, r, r)
+    else:
+        touch(rel, st.lineno, st.end_lineno)
+
+
 def analyze_py(rel, old_text, new_text, hunks, patch_ok):
     try:
         ot = ast.parse(old_text.encode("utf-8", "surrogateescape"))
     except Exception:
+        touch_all()
         return touchers(rel) | openers(rel)
     try:
         nt = ast.parse(new_text.encode("utf-8", "surrogateescape"))
     except Exception:
         # the module no longer compiles: every test that imports it breaks
+        touch_all()
         return touchers(rel) | openers(rel)
     if patch_ok and ast.dump(ot) == ast.dump(nt):
         # same program (comments / layout only): only tests that read the file as data can notice
         return openers(rel)
     if not patch_ok:
+        touch_all()
         return touchers(rel) | openers(rel)
 
     ostr, nstr = string_lines(ot), string_lines(nt)
@@ -594,6 +636,7 @@ def analyze_py(rel, old_text, new_text, hunks, patch_ok):
             continue
         for r, _txt in srem:
             bits |= mark_old_line(rel, ot, nt, r, srem, sadd)
+            touch_stmt(rel, ot, r)
         if sadd and (not srem or indent(srem[0][1]) != indent(sadd[0][1]) or len(sadd) != len(srem)):
             bits |= mark_insertion(rel, ot, nt, sadd)
     return bits
@@ -640,7 +683,7 @@ def mark_old_line(rel, ot, nt, r, srem, sadd):
                 same_outside = masked_dump(s) == masked_dump(npath[-1])
             except Exception:
                 same_outside = False
-            if same_outside and in_func:
+            if same_outside and (in_func or M.get("starts")):
                 # the statements differ only inside lambda bodies: only running a lambda can show it.
                 # Only inside a function body: line tracing never reports the first line of a lambda
                 # whose line also runs at class / module level (one-line table entries), so there
@@ -668,13 +711,17 @@ def mark_insertion(rel, ot, nt, sadd):
         if isinstance(p, _DEF):
             last_def = i
     if last_def is None:
+        touch_all()
         return loaders(rel)
     qual = [p.name for p in npath[: last_def + 1] if isinstance(p, _DEF + (ast.ClassDef,))]
     if len(qual) != last_def + 1:
+        touch_all()
         return loaders(rel)  # the function sits under an if/try at module level: stay coarse
     old_def = find_def(ot, qual)
     if old_def is None or not isinstance(old_def, _DEF):
+        touch_all()
         return loaders(rel)  # a brand new function may override an inherited one
+    touch(rel, stmt_lo(old_def), old_def.end_lineno)
     return cov(rel, stmt_lo(old_def), old_def.end_lineno, "fn")
 
 
@@ -801,20 +848,25 @@ def file_bits(fc):
     new_rel = fc.rename_to or fc.new_path
     rel = old_rel or new_rel
     if rel is None:
+        touch_all()
         return ALL
     base = rel.rsplit("/", 1)[-1]
     if base in PYTEST_FILES or (new_rel and new_rel.rsplit("/", 1)[-1] in PYTEST_FILES):
+        touch_all()
         return ALL
     old_text = read_old(old_rel) if old_rel and not fc.is_new else None
 
     if fc.is_deleted or (fc.rename_from and fc.rename_to and fc.rename_from != fc.rename_to):
+        touch_all()
         bits |= touchers(old_rel) | openers(old_rel)
         if not fc.is_deleted:
             bits |= new_file_bits(new_rel)
         return bits
     if old_text is None:  # a file the pinned commit does not have
+        touch_all()
         return new_file_bits(new_rel or rel)
     if fc.binary:
+        touch_all()
         return touchers(rel) | openers(rel)
     if not fc.hunks:
         return 0  # mode change only
@@ -828,6 +880,14 @@ def file_bits(fc):
             return ALL
     if new_text == old_text and ok:
         return 0
+    if rel.endswith("tpc-ds/tpc-ds.sql"):
+        op, np_ = fixture_pairs(old_text), fixture_pairs(new_text)
+        if not ok or op is None or np_ is None or len(op) != len(np_):
+            touch_all()
+        else:
+            TOUCH["tpcds_idx"].update(i for i, (a, b) in enumerate(zip(op, np_)) if a[0] != b[0] or a[1] != b[1])
+    elif rel.startswith(FIXDIR + "optimizer/tpc-ds/") or not ok:
+        touch_all()
     if ok and rel.startswith(FIXDIR) and "fx" in M:
         return fixture_bits(rel, old_text, new_text)
     return openers(rel) | (row(M["hopened"][rel]) if rel in M.get("hopened", {}) else 0)
@@ -939,6 +999,73 @@ def pack_cost(nums, ms):
     return max(sum(ms[t] for t in w) for w in ws) / 1000 + 2 * len(ws)
 
 
+TPCDS_ID = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
+try:
+    TPCDS = _load("tpcds.bin")
+except OSError:
+    TPCDS = None
+P_PASS_HEAVY = float(os.environ.get("BLAST_P_PASS_HEAVY", "0.8"))
+HEAVY_MARGIN = float(os.environ.get("BLAST_HEAVY_MARGIN", "1.0"))
+HEAVY = os.environ.get("BLAST_HEAVY", "1") == "1"
+
+
+def tpcds_lite():
+    """(query indices to execute, cpu of the check) for the per-query TPC-DS check, or None."""
+    if TPCDS is None or TOUCH["all"]:
+        return None
+    lines = TOUCH["lines"]
+    for f, ls in lines.items():
+        if ls & TPCDS["setup"].get(f, set()):
+            return None
+    idx = set(TOUCH["tpcds_idx"])
+    for i, q in enumerate(TPCDS["queries"]):
+        if TPCDS["executes"][i] and any(ls & q.get(f, set()) for f, ls in lines.items()):
+            idx.add(i)
+    idx = sorted(idx)
+    return idx, TPCDS["setup_cpu"] + 0.3 + sum(TPCDS["cpu"][i] for i in idx if i < len(TPCDS["cpu"]))
+
+
+def heavy_plan(cands, ms, num2id, lite, light_files):
+    """Heavy tests worth running even if the commit breaks something: taking one out of the
+    selection lowers the busiest worker by more than running it costs."""
+    if not HEAVY:
+        return [], 0.0
+    cpu = CPU["tests"]
+    incl = set(cands)
+    chosen = []
+    paid = set(light_files)
+    est = 0.0
+    while True:
+        best = None
+        base = pack_cost(sorted(incl), ms)
+        for n in incl:
+            tid = num2id[n]
+            rec = ms[n] / 1000
+            if rec < 1.5:
+                continue
+            f = tid.split("::")[0]
+            if tid == TPCDS_ID:
+                if lite is None:
+                    continue
+                c = lite[1]  # includes the class setup and imports
+            else:
+                c = cpu.get(tid, 99.0) + (0.0 if f in paid else file_overhead(f))
+            if CPU_SCALE * c > 0.8 * rec:
+                continue
+            gain = base - pack_cost(sorted(incl - {n}), ms)
+            value = P_PASS_HEAVY * gain - CPU_SCALE * c - HEAVY_MARGIN
+            if value > 0 and (best is None or value > best[0]):
+                best = (value, n, tid, CPU_SCALE * c)
+        if best is None:
+            break
+        _v, n, tid, cost = best
+        chosen.append(tid)
+        incl.discard(n)
+        paid.add(tid.split("::")[0])
+        est += cost
+    return chosen, est
+
+
 def p_clean(patched):
     """Prior probability that a change breaks no test at all (given it reaches some test)."""
     q = 1.0
@@ -1034,6 +1161,7 @@ def main():
             with open(os.path.join(cdir, name), "rb") as f:
                 text = f.read().decode("utf-8", "surrogateescape")
             fcs = parse_patch(text)
+            touch_reset()
             bits = 0
             for fc in fcs:
                 bits |= file_bits(fc)
@@ -1048,10 +1176,17 @@ def main():
             log(f"{cid}: analysis failed ({e!r}); selecting every test")
             nums = all_nums
         nums = sorted(set(nums))
-        run, after, est = [], [], 0.0
+        run, after, est, lite = [], [], 0.0, None
         if verify and patched is not None and nums and not unknown:
             run, after, est = plan(nums, ms, num2id, p_clean(patched))
-        commits.append({"cid": cid, "cands": nums, "run": run, "after": after, "est": est, "patched": patched})
+            lite = tpcds_lite()
+            heavy, hest = heavy_plan(nums, ms, num2id, lite, {t.split("::")[0] for t in run})
+            if heavy:
+                run = run + [t for t in heavy if t not in run]
+                after = list(after) + heavy
+                est += hest
+        commits.append({"cid": cid, "cands": nums, "run": run, "after": after, "est": est, "patched": patched,
+                        "tpcds_only": lite[0] if lite and TPCDS_ID in run else None})
 
     def saving(c):
         return pack_cost(c["cands"], ms) - pack_cost(sorted(set(c["cands"]) - {id2num[t] for t in c["run"]}), ms) - c["est"]
@@ -1064,7 +1199,8 @@ def main():
     nworkers = int(os.environ.get("BLAST_JOBS", "2"))
 
     def job_of(c):
-        return {"sg": SG, "patched": c["patched"], "tests": c["run"], "after_fail": c["after"], "duck": duck}
+        return {"sg": SG, "patched": c["patched"], "tests": c["run"], "after_fail": c["after"], "duck": duck,
+                "tpcds_only": c.get("tpcds_only")}
 
     def timeout_of(c, left):
         return min(max(20.0, 3 * c["est"] + 10), max(5.0, left - 5))

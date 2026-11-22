@@ -100,6 +100,7 @@ m = {
     "rows": rows,
     "cpu": cpu,
     "comp_inst": True,  # inst also records Tokenizer / Parser / Generator / Dialect classes
+    "starts": True,  # function starts recorded: a lambda's first line counts when it runs
 }
 blob = zlib.compress(pickle.dumps(m, protocol=4), 9)
 os.makedirs(os.path.dirname(os.path.abspath(out_map)), exist_ok=True)

@@ -912,31 +912,36 @@ def order_tests(tids):
     return out
 
 
+MAX_TEST_CPU = float(os.environ.get("BLAST_MAX_TEST_CPU", "1.0"))  # never run a test heavier than this
+MAX_JOB_CPU = float(os.environ.get("BLAST_MAX_JOB_CPU", "4.0"))  # nor a job heavier than this
+MARGIN = float(os.environ.get("BLAST_MARGIN", "0.6"))  # expected saving must beat the cost by this much
+
+
 def plan(cands, ms, num2id, q):
-    """-> (tests to run, tests still worth running after a failure, estimated cpu)."""
+    """-> (tests to run, tests still worth running after a failure, estimated cpu).
+
+    Only light tests are ever run (the scorer's CPU is dear and estimates are rough); heavy
+    tests are included without running. Running pays off mainly when it can prove a commit
+    clean, so a job runs only when q * (what proving it clean saves) clearly beats its cost."""
     if not cands:
         return [], [], 0.0
     cpu = CPU["tests"]
+    heavy = [n for n in cands if cpu.get(num2id[n], 1.0) > MAX_TEST_CPU]
+    light = [n for n in cands if cpu.get(num2id[n], 1.0) <= MAX_TEST_CPU]
+    if not light:
+        return [], [], 0.0
+    run = [num2id[n] for n in light]
+    rc_all = run_cost(run)
+    if rc_all > MAX_JOB_CPU:
+        return [], [], 0.0
+    ordered = order_tests(run)
     base = pack_cost(cands, ms)
-    best = (base, [], [], 0.0)
-    by_cpu = sorted(cands, key=lambda n: -cpu.get(num2id[n], 1.0))
-    for j in range(0, min(6, len(cands))):
-        keep = by_cpu[:j]
-        run = [num2id[n] for n in by_cpu[j:]]
-        rc_all = run_cost(run)
-        ordered = order_tests(run)
-        # after a failure the commit is not empty; only tests whose run is cheaper than
-        # their share of a worker keep being worth running
-        after = [t for t in run if CPU_SCALE * cpu.get(t, 1.0) < ms[id2num_g[t]] / 1000 - 0.3]
-        rc_first = run_cost(ordered[:1])
-        rc_after = CPU_SCALE * sum(cpu.get(t, 1.0) for t in after)
-        rest = sorted(set(cands) - {id2num_g[t] for t in after})
-        fail_cost = rc_first + rc_after + pack_cost(rest, ms)
-        clean_cost = rc_all + pack_cost(sorted(keep), ms)
-        e = q * clean_cost + (1 - q) * fail_cost
-        if e < best[0] - 0.1:
-            best = (e, ordered, after, rc_all)
-    return best[1], best[2], best[3]
+    clean_cost = rc_all + pack_cost(sorted(heavy), ms)
+    fail_cost = run_cost(ordered[:1]) + base  # stops at the first failure
+    e = q * clean_cost + (1 - q) * fail_cost
+    if e < base - MARGIN:
+        return ordered, [], rc_all
+    return [], [], 0.0
 
 
 id2num_g = {}

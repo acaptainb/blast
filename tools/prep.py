@@ -49,7 +49,48 @@ def walk(c):
 
 walk(core.Expr)
 
+# Dialect components. For each Tokenizer / Parser / Generator / Dialect class: itself, its
+# subclasses, and every dialect class that uses one of them (and that dialect's subclasses).
+# A class attribute of such a class is read through an instance of one of these classes.
+import sqlglot.tokens as tokens  # noqa: E402
+import sqlglot.parser as parser_mod  # noqa: E402
+import sqlglot.generator as generator_mod  # noqa: E402
+
+csubs = {}
+
+
+def cwalk(c):
+    acc = {key(c)}
+    for s in c.__subclasses__():
+        acc |= cwalk(s)
+    csubs[key(c)] = acc
+    return acc
+
+
+for base in (tokens.Tokenizer, parser_mod.Parser, generator_mod.Generator, Dialect):
+    cwalk(base)
+
+users_of = {}  # component class -> dialect classes whose tokenizer/parser/generator it is
+for dkey in csubs[key(Dialect)]:
+    mod, qual = dkey.split(":")
+    obj = sys.modules[mod]
+    for part in qual.split("."):
+        obj = getattr(obj, part)
+    for attr in ("tokenizer_class", "parser_class", "generator_class", "jsonpath_tokenizer_class"):
+        c = getattr(obj, attr, None)
+        if isinstance(c, type):
+            users_of.setdefault(key(c), set()).add(dkey)
+
+comp = {}
+for ckey, sub in csubs.items():
+    fam = set(sub)
+    for s in sub:
+        for d in users_of.get(s, ()):
+            fam |= csubs.get(d, {d})
+    comp[ckey] = sorted(fam)
+
 refs = {}
+modattr = {}  # attribute name -> [(file, line, text of the object it is read from)] at module level
 modrefs = {}  # identifier -> number of reads at module / class level (outside any function)
 for root, _dirs, files in os.walk(os.path.join(repo, "sqlglot")):
     for fn in files:
@@ -80,12 +121,15 @@ for root, _dirs, files in os.walk(os.path.join(repo, "sqlglot")):
                         name = child.id
                     if name:
                         modrefs[name] = modrefs.get(name, 0) + 1
+                    if isinstance(child, ast.Attribute) and isinstance(child.ctx, ast.Load):
+                        # module / class level read of X.NAME: keep the text of X
+                        modattr.setdefault(child.attr, []).append((rel, child.lineno, ast.unparse(child.value)))
                 visit(child, inner)
 
         visit(tree, False)
 
 refs = {n: {f: sorted(ls) for f, ls in d.items()} for n, d in refs.items()}
-blob = zlib.compress(pickle.dumps({"subs": subs, "refs": refs, "modrefs": modrefs}, protocol=4), 9)
+blob = zlib.compress(pickle.dumps({"subs": subs, "comp": comp, "refs": refs, "modrefs": modrefs, "modattr": modattr}, protocol=4), 9)
 with open(out, "wb") as f:
     f.write(blob)
 print(f"expression classes={len(subs)} names={len(refs)} bytes={len(blob)}")

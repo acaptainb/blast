@@ -415,6 +415,24 @@ def scope_stmt_bits(rel, s, path):
                     users |= row(r)
                 users |= refcov(k.split(":")[1].split(".")[-1])
             return load & users
+        fam = S.get("comp", {}).get(ckey)
+        if fam is not None and M.get("comp_inst"):
+            # A Tokenizer / Parser / Generator / Dialect class: its attributes are read through
+            # an instance of the class, a subclass, or a dialect that uses one of them, or by
+            # code that names one of these classes. Unless another module body copies it.
+            outer = {k.split(":")[1].split(".")[0] for k in fam} | {classes[0].name}
+            for nm in names:
+                for _f, _ln, txt in S["modattr"].get(nm, ()):
+                    if set(re.findall(r"\w+", txt)) & outer:
+                        return load
+            users = 0
+            for k in fam:
+                r = M["inst"].get(k)
+                if r is not None:
+                    users |= row(r)
+            for o in outer:
+                users |= refcov(o)
+            return load & users
     users = 0
     for nm in names:
         if not _CONST_NAME.match(nm):
@@ -731,12 +749,24 @@ CPU = _load_json("cpu.json", {"tests": {}, "file_overhead": {}})
 CPU_SCALE = float(os.environ.get("BLAST_CPU_SCALE", "1.15"))
 
 
+FORK = hasattr(os, "fork") and os.environ.get("BLAST_FORK", "1") == "1"
+HEAVY_FILES = {"tests/test_executor.py", "tests/test_optimizer.py"}  # import pandas / duckdb
+FORK_SAVE = float(os.environ.get("BLAST_FORK_SAVE", "0.3"))  # interpreter + stdlib, paid once
+HEAVY_SAVE = float(os.environ.get("BLAST_HEAVY_SAVE", "1.0"))  # pandas + numpy + duckdb, paid once
+
+
+def file_overhead(f):
+    o = CPU["file_overhead"].get(f, 1.0)
+    if FORK:
+        o -= FORK_SAVE + (HEAVY_SAVE if f in HEAVY_FILES else 0.0)
+    return max(o, 0.15)
+
+
 def run_cost(tids):
     if not tids:
         return 0.0
     files = {t.split("::")[0] for t in tids}
-    fo = CPU["file_overhead"]
-    over = max(fo.get(f, 1.0) for f in files) + 0.08 * (len(files) - 1)
+    over = max(file_overhead(f) for f in files) + 0.08 * (len(files) - 1)
     return CPU_SCALE * (over + sum(CPU["tests"].get(t, 1.0) for t in tids))
 
 
@@ -808,8 +838,6 @@ id2num_g = {}
 # --------------------------------------------------------------------------- main
 def main():
     import time
-    import threading
-    from concurrent.futures import ThreadPoolExecutor
 
     import runner
 
@@ -865,32 +893,96 @@ def main():
     jobs = [c for c in commits if c["run"]]
     jobs.sort(key=lambda c: saving(c) / max(c["est"], 0.1), reverse=True)
     duck = os.path.join(MAPS, "duck.pkl")
+    duck = duck if os.path.exists(duck) else None
     nworkers = int(os.environ.get("BLAST_JOBS", "2"))
-    lock = threading.Lock()
-    committed = [0.0]
 
-    def do(c):
-        with lock:
-            left = budget - (time.monotonic() - t_start)
-            if committed[0] + c["est"] * 1.5 + 3 > left * nworkers:
-                log(f"{c['cid']}: verification skipped (time budget)")
+    def job_of(c):
+        return {"sg": SG, "patched": c["patched"], "tests": c["run"], "after_fail": c["after"], "duck": duck}
+
+    def timeout_of(c, left):
+        return min(max(20.0, 3 * c["est"] + 10), max(5.0, left - 5))
+
+    if FORK and jobs:
+        heavy = any(t.split("::")[0] in HEAVY_FILES for c in jobs for t in c["run"])
+        fs = runner.ForkServer(heavy)
+        queue = list(jobs)
+        running = {}  # jid -> [commit, deadline, current test, start]
+        committed = 0.0
+        jid = 0
+        while queue or running:
+            while queue and len(running) < nworkers:
+                c = queue.pop(0)
+                left = budget - (time.monotonic() - t_start)
+                if committed + c["est"] * 1.5 + 3 > left * nworkers:
+                    log(f"{c['cid']}: verification skipped (time budget)")
+                    c["res"] = {}
+                    continue
+                committed += c["est"]
                 c["res"] = {}
-                return
-            committed[0] += c["est"]
-        tids = c["run"]
-        timeout = min(max(20.0, 3 * c["est"] + 10), max(5.0, left - 5))
-        job = {"sg": SG, "patched": c["patched"], "tests": tids, "after_fail": c["after"], "duck": duck if os.path.exists(duck) else None}
-        t0 = time.monotonic()
-        c["res"] = runner.run_job(job, timeout)
-        with lock:
-            committed[0] -= c["est"]
-        log(
-            f"{c['cid']}: ran {len(tids)} tests (est {c['est']:.1f}s) in {time.monotonic() - t0:.1f}s, "
-            f"{sum(c['res'].values())} failed, {len(tids) - len(c['res'])} unfinished"
-        )
+                jid += 1
+                fs.send({"id": jid, "job": job_of(c)})
+                now = time.monotonic()
+                running[jid] = [c, now + timeout_of(c, left), None, now]
+            if not running:
+                break
+            msgs = fs.read(0.05)
+            if msgs is None:  # the fork server died: whatever is unfinished stays unverified
+                for j, (c, _d, cur, _s) in running.items():
+                    if cur is not None and cur not in c["res"]:
+                        c["res"][cur] = True
+                running.clear()
+                break
+            for j, kind, tid in msgs:
+                ent = running.get(j)
+                if ent is None:
+                    continue
+                c = ent[0]
+                if kind == "S":
+                    ent[2] = tid
+                elif kind in ("P", "F"):
+                    c["res"][tid] = kind == "F"
+                    ent[2] = None
+                elif kind == "X":
+                    if ent[2] is not None and ent[2] not in c["res"]:
+                        c["res"][ent[2]] = True  # crashed or was killed inside this test
+                    committed -= c["est"]
+                    log(
+                        f"{c['cid']}: ran {len(c['run'])} tests (est {c['est']:.1f}s) in {time.monotonic() - ent[3]:.1f}s, "
+                        f"{sum(c['res'].values())} failed, {len(c['run']) - len(c['res'])} unfinished"
+                    )
+                    del running[j]
+            now = time.monotonic()
+            for j, ent in list(running.items()):
+                if now > ent[1]:
+                    fs.send({"kill": j})
+                    ent[1] = now + 30  # the X line follows; ask again only if it does not
+        fs.close()
+    else:
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
 
-    with ThreadPoolExecutor(max(1, nworkers)) as pool:
-        list(pool.map(do, jobs))
+        lock = threading.Lock()
+        committed_ = [0.0]
+
+        def do(c):
+            with lock:
+                left = budget - (time.monotonic() - t_start)
+                if committed_[0] + c["est"] * 1.5 + 3 > left * nworkers:
+                    log(f"{c['cid']}: verification skipped (time budget)")
+                    c["res"] = {}
+                    return
+                committed_[0] += c["est"]
+            t0 = time.monotonic()
+            c["res"] = runner.run_job(job_of(c), timeout_of(c, left))
+            with lock:
+                committed_[0] -= c["est"]
+            log(
+                f"{c['cid']}: ran {len(c['run'])} tests (est {c['est']:.1f}s) in {time.monotonic() - t0:.1f}s, "
+                f"{sum(c['res'].values())} failed, {len(c['run']) - len(c['res'])} unfinished"
+            )
+
+        with ThreadPoolExecutor(max(1, nworkers)) as pool:
+            list(pool.map(do, jobs))
 
     out = []
     for c in commits:

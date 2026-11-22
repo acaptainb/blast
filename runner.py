@@ -354,6 +354,152 @@ def run_job(job, timeout, python=sys.executable):
     return res
 
 
+class ForkServer:
+    """POSIX only. One process imports the heavy libraries once, then forks a child per job.
+
+    Protocol on the server's stdin:   {"id": n, "job": {...}}   or   {"kill": n}
+    and on its stdout:                "<id> <S|P|F|D> <test id>"  and  "<id> X -" when a child exits.
+    """
+
+    def __init__(self, heavy, python=sys.executable):
+        import subprocess
+
+        self.p = subprocess.Popen(
+            [python, "-I", os.path.abspath(__file__), "--zygote", "1" if heavy else "0"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        self.buf = b""
+
+    def send(self, msg):
+        import json
+
+        self.p.stdin.write((json.dumps(msg) + "\n").encode())
+        self.p.stdin.flush()
+
+    def read(self, timeout):
+        import select
+
+        r, _, _ = select.select([self.p.stdout], [], [], timeout)
+        out = []
+        if r:
+            chunk = os.read(self.p.stdout.fileno(), 1 << 16)
+            if not chunk:
+                return None
+            self.buf += chunk
+            while b"\n" in self.buf:
+                line, self.buf = self.buf.split(b"\n", 1)
+                jid, kind, tid = line.decode().split(" ", 2)
+                out.append((int(jid), kind, tid))
+        return out
+
+    def close(self):
+        try:
+            self.p.stdin.close()
+        except Exception:
+            pass
+        try:
+            self.p.wait(5)
+        except Exception:
+            self.p.kill()
+
+
+def zygote_main(heavy):
+    import json
+    import select
+    import signal
+
+    # what every child needs anyway
+    import pickle  # noqa: F401
+    import unittest  # noqa: F401
+    import concurrent.futures  # noqa: F401
+    import importlib.abc  # noqa: F401
+    import importlib.machinery  # noqa: F401
+    import importlib.util  # noqa: F401
+    import logging  # noqa: F401
+    import tempfile  # noqa: F401
+    import datetime  # noqa: F401
+    import decimal  # noqa: F401
+    import typing  # noqa: F401
+    import re  # noqa: F401
+
+    if heavy:
+        try:
+            import numpy  # noqa: F401
+            import pandas  # noqa: F401
+            import pandas.testing  # noqa: F401
+            import duckdb  # noqa: F401
+        except Exception:
+            pass
+
+    out_fd = os.dup(1)
+    null = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(null, 1)
+    os.dup2(null, 2)
+    children = {}
+    pids = {}
+    buf = b""
+    eof = False
+    while not eof or children:
+        if not eof:
+            r, _, _ = select.select([0], [], [], 0.02)
+            if r:
+                chunk = os.read(0, 1 << 16)
+                if not chunk:
+                    eof = True
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    msg = json.loads(line)
+                    if "kill" in msg:
+                        pid = pids.get(msg["kill"])
+                        if pid:
+                            try:
+                                os.kill(pid, signal.SIGKILL)
+                            except OSError:
+                                pass
+                        continue
+                    jid = msg["id"]
+                    pid = os.fork()
+                    if pid == 0:
+                        try:
+                            prefix = f"{jid} ".encode()
+
+                            class Out:
+                                def write(self, b):
+                                    os.write(out_fd, prefix + b)
+
+                                def flush(self):
+                                    pass
+
+                            sys.stdout = open(os.devnull, "w")
+                            sys.stderr = sys.stdout
+                            child_main(msg["job"], Out())
+                        finally:
+                            os._exit(0)
+                    children[pid] = jid
+                    pids[jid] = pid
+        else:
+            select.select([], [], [], 0.02)
+        while children:
+            try:
+                pid, _status = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                children.clear()
+                break
+            if pid == 0:
+                break
+            jid = children.pop(pid, None)
+            if jid is not None:
+                pids.pop(jid, None)
+                os.write(out_fd, f"{jid} X -\n".encode())
+    os._exit(0)
+
+
+if __name__ == "__main__" and len(sys.argv) > 2 and sys.argv[1] == "--zygote":
+    zygote_main(sys.argv[2] == "1")
+
 if __name__ == "__main__":
     import json
 

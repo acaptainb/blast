@@ -133,6 +133,28 @@ try:
 except Exception:
     pass
 
+# dialect components: record every Tokenizer / Parser / Generator / Dialect class instantiated
+import sqlglot.tokens as _tokens  # noqa: E402
+import sqlglot.parser as _parser  # noqa: E402
+import sqlglot.generator as _generator  # noqa: E402
+import sqlglot.dialects.dialect as _dialect  # noqa: E402
+
+
+def _recording_new(base):
+    orig = base.__dict__.get("__new__")
+
+    def __new__(cls, *a, **k):
+        inst.add(cls)
+        if orig is not None:
+            return orig(cls, *a, **k)
+        return object.__new__(cls)
+
+    base.__new__ = __new__
+
+
+for _base in (_tokens.Tokenizer, _parser.Parser, _generator.Generator, _dialect.Dialect):
+    _recording_new(_base)
+
 path, clsname, meth = test_id.split("::")
 outcome, msg = "pass", ""
 c0 = time.process_time()

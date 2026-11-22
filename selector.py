@@ -38,18 +38,24 @@ def _load(name):
 
 M = _load("depmap.bin")
 S = _load("static.bin")
-try:
-    CMP = _load("cmpprof.bin")
-except OSError:
-    CMP = {"cases": {}, "sites": set()}
-try:
-    DPROF = _load("dictprof.bin")
-except OSError:
-    DPROF = {}
-try:
-    ATTR = _load("attrprof.bin")
-except OSError:
-    ATTR = None
+_lazy = {}
+_LAZY_NAMES = {"CMP": "cmpprof.bin", "DPROF": "dictprof.bin", "ATTR": "attrprof.bin", "TPCDS": "tpcds.bin"}
+
+
+def lazy(name):
+    """Profiles are loaded on first use: most batches never need some of them."""
+    if name not in _lazy:
+        try:
+            _lazy[name] = _load(name)
+        except OSError:
+            _lazy[name] = None
+    return _lazy[name]
+
+
+def __getattr__(name):  # selector.CMP etc. for the development tools
+    if name in _LAZY_NAMES:
+        return lazy(_LAZY_NAMES[name])
+    raise AttributeError(name)
 ATTRS = os.environ.get("BLAST_ATTRS", "1") == "1"
 
 
@@ -57,6 +63,7 @@ def attr_bits(ckey, names):
     """Tests that read one of these class constants from this class (via the MRO), or None
     when that cannot be shown: the name is read dynamically by string somewhere, read at
     module / class level (a derived value), or read while importing."""
+    ATTR = lazy("attrprof.bin")
     if not ATTRS or ATTR is None:
         return None
     bits = 0
@@ -534,6 +541,7 @@ def swap_bits(rel, s_old, s_new):
     swaps = []
     if s_new is None or not op_swaps(s_old, s_new, swaps) or not swaps:
         return None
+    CMP = lazy("cmpprof.bin") or {"cases": {}, "sites": set()}
     cases = CMP["cases"]
     sites = CMP["sites"]
     bits = 0
@@ -577,7 +585,7 @@ def dict_bits(rel, s_old, s_new, path):
     classes = [p.name for p in path if isinstance(p, ast.ClassDef)]
     if not classes:
         return None
-    m = DPROF.get(f"{rel}:{'.'.join(classes)}.{s_old.targets[0].id}")
+    m = (lazy("dictprof.bin") or {}).get(f"{rel}:{'.'.join(classes)}.{s_old.targets[0].id}")
     if m is None or m["global_all"]:
         return None
     entry_key = dict(m["entries"])
@@ -1038,10 +1046,6 @@ def pack_cost(nums, ms):
 
 
 TPCDS_ID = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
-try:
-    TPCDS = _load("tpcds.bin")
-except OSError:
-    TPCDS = None
 P_PASS_HEAVY = float(os.environ.get("BLAST_P_PASS_HEAVY", "0.8"))
 HEAVY_MARGIN = float(os.environ.get("BLAST_HEAVY_MARGIN", "1.0"))
 HEAVY = os.environ.get("BLAST_HEAVY", "1") == "1"
@@ -1049,7 +1053,10 @@ HEAVY = os.environ.get("BLAST_HEAVY", "1") == "1"
 
 def tpcds_lite():
     """(query indices to execute, cpu of the check) for the per-query TPC-DS check, or None."""
-    if TPCDS is None or TOUCH["all"]:
+    if TOUCH["all"]:
+        return None
+    TPCDS = lazy("tpcds.bin")
+    if TPCDS is None:
         return None
     lines = TOUCH["lines"]
     for f, ls in lines.items():

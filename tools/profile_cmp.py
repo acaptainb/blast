@@ -165,7 +165,22 @@ def child(repo, job_path, out_path):
     real = os.dup(1)
     null = os.open(os.devnull, os.O_WRONLY)
     os.dup2(null, 1)
-    runner.child_main({"sg": repo, "patched": {}, "tests": job["tests"], "duck": job.get("duck")}, Out())
+    reported = set()
+    _write = Out.write
+
+    def write(self, b):
+        kind, _, tid = b.decode().strip().partition(" ")
+        if kind in ("P", "F"):
+            reported.add(tid)
+        _write(self, b)
+
+    Out.write = write
+    # run every test even after a failure: an unprofiled test must never look "clean"
+    runner.child_main({"sg": repo, "patched": {}, "tests": job["tests"], "after_fail": job["tests"], "duck": job.get("duck")}, Out())
+    for tid in job["tests"]:
+        if tid not in reported:
+            sys.__stderr__.write(f"BASELINE FAIL {tid} (did not report)\n")
+            unsure.add(index[tid])
     with open(out_path, "wb") as f:
         pickle.dump({"sites": sites, "eqis": eqis, "bound": bound, "unsure": sorted(unsure)}, f)
     os._exit(0)

@@ -753,7 +753,7 @@ CPU_SCALE = float(os.environ.get("BLAST_CPU_SCALE", "1.15"))
 FORK = hasattr(os, "fork") and os.environ.get("BLAST_FORK", "1") == "1"
 HEAVY_FILES = {"tests/test_executor.py", "tests/test_optimizer.py"}  # import pandas / duckdb
 FORK_SAVE = float(os.environ.get("BLAST_FORK_SAVE", "0.3"))  # interpreter + stdlib, paid once
-HEAVY_SAVE = float(os.environ.get("BLAST_HEAVY_SAVE", "1.0"))  # pandas + numpy + duckdb, paid once
+HEAVY_SAVE = float(os.environ.get("BLAST_HEAVY_SAVE", "0.0"))  # pandas + numpy + duckdb (preloaded only when >= 2 heavy jobs)
 
 
 def file_overhead(f):
@@ -904,7 +904,8 @@ def main():
         return min(max(20.0, 3 * c["est"] + 10), max(5.0, left - 5))
 
     if FORK and jobs:
-        heavy = any(t.split("::")[0] in HEAVY_FILES for c in jobs for t in c["run"])
+        # preloading pandas / duckdb costs about as much as one heavy job saves by it
+        heavy = sum(any(t.split("::")[0] in HEAVY_FILES for t in c["run"]) for c in jobs) >= 2
         fs = runner.ForkServer(heavy)
         queue = list(jobs)
         running = {}  # jid -> [commit, deadline, current test, start]
